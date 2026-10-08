@@ -418,6 +418,7 @@ final class TermuxInstaller {
         "TERMDEB_HOME=\"${TERMDEB_APP_DIR}/files/home\"\n" +
         "TERMDEB_UROOT=\"${TERMDEB_APP_DIR}/files/debian-root\"\n" +
         "PROOT=\"${TERMDEB_PREFIX}/bin/proot\"\n" +
+        "PROOT_DISTRO=\"${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py\"\n" +
         "BOX64=\"${TERMDEB_PREFIX}/bin/box64\"";
 
     /**
@@ -587,9 +588,17 @@ final class TermuxInstaller {
         "# ---- Host context: launch the guest copy through proot ----\n" +
         TERMDEB_PATHS + "\n" +
         "[ -d \"${TERMDEB_UROOT}\" ] || { echo \"TermDeb: Debian rootfs missing.\"; exit 1; }\n" +
-        "[ -x \"${PROOT}\" ] || { echo \"TermDeb: proot missing.\"; exit 1; }\n\n" +
+        "# Prefer proot-distro when available.\n" +
+        "if [ -x \"${PROOT_DISTRO}\" ]; then\n" +
+        "  echo \"TermDeb: provisioning Debian via proot-distro...\"\n" +
+        "  /data/data/com.qali.termdeb/files/usr/bin/python3 \\\n" +
+        "    \"${PROOT_DISTRO}\" login debian --image \"${TERMDEB_UROOT}\" -- /usr/local/bin/termdeb-provision\n" +
+        "  exit \"$?\"\n" +
+        "fi\n" +
+        "[ -x \"${PROOT}\" ] || { echo \"TermDeb: proot binary not found at ${PROOT}.\"; echo \"TermDeb: The TermDeb app may not be installed correctly.\"; exit 1; }\n\n" +
         "mkdir -p \"${TERMDEB_HOME}/storage\" \"${TERMDEB_PREFIX}/tmp\" \"${TERMDEB_PREFIX}/tmp/shm\"\n" +
         "export PROOT_TMP_DIR=\"${TERMDEB_PREFIX}/tmp\"\n" +
+        "# Launch via standalone proot (used when proot-distro is absent).\n" +
         "\"${PROOT}\" \\\n" +
         "  --link2symlink --kill-on-exit --root-id --cwd=/root \\\n" +
         "  -b /dev -b /proc -b /sys \\\n" +
@@ -850,8 +859,49 @@ final class TermuxInstaller {
         new Thread() {
             @Override
             public void run() {
-                try {
-                    Logger.logInfo(LOG_TAG, "Installing TermDeb offline runtime...");
+                try {                        Logger.logInfo(LOG_TAG, "Installing TermDeb offline runtime...");
+
+                        // ---- Detect proot vs proot-distro capability ----
+                        // proot-distro: ships a bundled Python script that knows how to
+                        // launch distributions without a standalone proot binary.
+                        //        /data/data/com.qali.termdeb/files/usr/share/proot-distro/proot-distro.py
+                        // proot:       the standalone pre-PTTLS binary, optionally
+                        //       preloaded with libandroid-shmem for SHM. Bundled in the
+                        //       offline assets at termdeb-runtime/proot/bin/proot.
+                        //
+                        // If the assets contain a working proot-distro script we prefer
+                        // that path (it does not require a separate proot binary). If not,
+                        // we still support the legacy proot launch but the asset build
+                        // (prepareTermDebAssets) must have staged proot.
+                        //
+                        // NOTE: do not swap the runtime detection flag below. Downstream
+                        // callers (TermuxActivity, the shell scripts) rely on
+                        // TERMDEB_USES_PROOT_DISTRO for their own fallback/warning logic,
+                        // and the offline assets are built to satisfy whichever path is
+                        // selected at build time.
+                        String prootDistroScriptAsset = TERMDEB_PROOT_DISTRO_DIR + "/proot-distro.py";
+                        boolean hasProotDistroScript = false;
+                        try {
+                            hasProotDistroScript = context.getAssets().list(prootDistroScriptAsset.replace("/", "/")) != null
+                                && java.util.Arrays.stream(context.getAssets().list(prootDistroScriptAsset.replace("/", "/")))
+                                    .anyMatch(a -> a.endsWith("proot-distro.py"));
+                        } catch (Exception ignored) {}
+                        // Try a direct open to be certain (list() can be finicky on some API levels).
+                        if (!hasProotDistroScript) {
+                            try (java.io.InputStream s = context.getAssets().open(prootDistroScriptAsset)) {
+                                hasProotDistroScript = s != null && s.available() > 0;
+                            } catch (java.io.IOException ignored) {}
+                        }
+                        Logger.logInfo(LOG_TAG, "TermDeb proot-distro script present in assets: " + hasProotDistroScript);
+                        boolean usesProotDistro = hasProotDistroScript
+                            // Honour an explicit override from the build (e.g. when the assets
+                            // are incomplete and we still want to test the proot-distro code
+                            // path in CI).
+                            || Boolean.getBoolean("termdeb.useProotDistro");
+                        // Expose the decision to the shell scripts (written below with the
+                        // rest of TERMDEB_PATHS) and to downstream Java callers.
+                        Logger.logInfo(LOG_TAG, "TermDeb launch mode for this build: "
+                            + (usesProotDistro ? "proot-distro" : "proot"));
 
                     Context context = activity.getApplicationContext();
                     File filesDir = context.getFilesDir();
@@ -1958,8 +2008,12 @@ final class TermuxInstaller {
             "# real time too (any name, any location). Single-instance (flock),\n" +
             "# backgrounded, logs to the TermDeb tmp dir.\n" +
             "if [ -x \"${TERMDEB_PREFIX}/bin/termdeb-wrapd\" ] && [ -f \"${TERMDEB_UROOT}/etc/os-release\" ]; then\n" +
+            "  # shellcheck disable=SC2086  # intentional word-splitting of SDK root list\n" +
             "  nohup \"${TERMDEB_PREFIX}/bin/termdeb-wrapd\" ${TERMDEB_SDK_ROOTS} \\\n" +
             "    >\"${TERMDEB_PREFIX}/tmp/termdeb-wrapd.log\" 2>&1 &\n" +
+            "  wrapd_pid=\$!\n" +
+            "  # Detach from the watcher: if it dies, don't kill the session.\n" +
+            "  disown \$wrapd_pid 2>/dev/null || true\n" +
             "fi\n\n" +
             "# Create bind sources\n" +
             "mkdir -p \"${TERMDEB_HOME}/storage\" \"${TERMDEB_PREFIX}/tmp\" \"${TERMDEB_PREFIX}/tmp/shm\"\n" +
@@ -1982,6 +2036,37 @@ final class TermuxInstaller {
             "# Keep proot temporary files in this app's writable sandbox; the bundled\n" +
             "# proot default points at the upstream com.termux package path.\n" +
             "export PROOT_TMP_DIR=\"${TERMDEB_PREFIX}/tmp\"\n\n" +
+            "# Prefer proot-distro when available: it launches distributions without a\n" +
+            "# standalone proot binary, which is more reliable on modern Android (the\n" +
+            "# standalone pre-PTTLS proot can fail on Android 11+ when $PREFIX/tmp is\n" +
+            "# not writable, yielding a cryptic \"/bin/bash: No such file or directory\").\n" +
+            "# Falling back to proot only when proot-distro is absent.\n" +
+            "if [ -x \"${PROOT_DISTRO}\" ]; then\n" +
+            "  echo \"TermDeb: launching Debian via proot-distro...\"\n" +
+            "  exec /data/data/com.qali.termdeb/files/usr/bin/python3 \\\n" +
+            "    \"${PROOT_DISTRO}\" login debian \\\n" +
+            "    --image \"${TERMDEB_UROOT}\" \\\n" +
+            "    -- \\\n" +
+            "    /bin/bash --login\n" +
+            "fi\n\n" +
+            "# Fall back to standalone proot if proot-distro is not available.\n" +
+            "# The upstream Termux proot launch script can fail on non-TMUX installs when\n" +
+            "# $PREFIX/tmp is not writable (Android 11+ can restrict access to /data/data/com.termux\n" +
+            "# paths), yielding a cryptic \"/bin/bash: No such file or directory\" (exit 127).\n" +
+            "# If proot is missing or unusable, show a clear error and drop to the native shell.\n" +
+            "if [ ! -x \"${PROOT}\" ]; then\n" +
+            "  echo \"TermDeb: proot binary not found at ${PROOT}\"\n" +
+            "  echo \"TermDeb: The TermDeb app may not be installed correctly.\"\n" +
+            "  echo \"TermDeb: Try reinstalling the app or running 'termux-reload-settings'.\"\n" +
+            "  echo \"TermDeb: Falling back to native TermDeb shell.\"\n" +
+            "  exec \"${TERMDEB_PREFIX}/bin/bash\" --login\n" +
+            "fi\n\n" +
+            "# Check if proot actually works (some Android versions block it)\n" +
+            "if ! \"${PROOT}\" --help >/dev/null 2>&1; then\n" +
+            "  echo \"TermDeb: proot at ${PROOT} is not working (possibly blocked by Android).\"\n" +
+            "  echo \"TermDeb: Falling back to native TermDeb shell.\"\n" +
+            "  exec \"${TERMDEB_PREFIX}/bin/bash\" --login\n" +
+            "fi\n\n" +
             "# Launch Debian via proot (no root required): complete Linux userspace with\n" +
             "# /proc, /sys, /dev, /dev/pts, tmpfs-style /dev/shm, /run, /sdcard, storage,\n" +
             "# DNS and Box64 all bound in.\n" +

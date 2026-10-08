@@ -22,6 +22,7 @@ TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
 TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
 TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
 PROOT="${TERMDEB_PREFIX}/bin/proot"
+PROOT_DISTRO="${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py"
 BOX64="${TERMDEB_PREFIX}/bin/box64"
 
 # Already inside the Debian guest (proot or native chroot)? Run a shell.
@@ -115,10 +116,14 @@ fi
 # Discovered SDK roots are passed as CLI args so they are watched in real
 # time too (any name, any location). Single-instance (flock), backgrounded,
 # logs to the TermDeb tmp dir.
+# NOTE: this is optional - if it crashes, the session still works.
 if [ -x "${TERMDEB_PREFIX}/bin/termdeb-wrapd" ] && [ -f "${TERMDEB_UROOT}/etc/os-release" ]; then
   # shellcheck disable=SC2086  # intentional word-splitting of SDK root list
   nohup "${TERMDEB_PREFIX}/bin/termdeb-wrapd" ${TERMDEB_SDK_ROOTS} \
     >"${TERMDEB_PREFIX}/tmp/termdeb-wrapd.log" 2>&1 &
+  wrapd_pid=$!
+  # Detach from the watcher: if it dies, don't kill the session.
+  disown $wrapd_pid 2>/dev/null || true
 fi
 
 # Create bind sources
@@ -144,12 +149,37 @@ fi
 TERMDEB_PROFILE_EOF
 fi
 
+# Prefer proot-distro when available: it launches distributions without a
+# standalone proot binary, which is more reliable on modern Android (the
+# standalone pre-PTTLS proot can fail on Android 11+ when $PREFIX/tmp is
+# not writable, yielding a cryptic "/bin/bash: No such file or directory").
+# Falling back to proot only when proot-distro is absent.
+if [ -x "${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py" ]; then
+  echo "TermDeb: launching Debian via proot-distro..."
+  exec /data/data/com.qali.termdeb/files/usr/bin/python3 \
+    "${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py" login debian \
+    --image "${TERMDEB_UROOT}" \
+    --broker /data/data/com.qali.termdeb/files/usr/bin/proot-distro-broker \
+    -- /bin/bash --login
+fi
+
+# Fall back to standalone proot if proot-distro is not available.
 # The upstream Termux proot launch script can fail on non-TMUX installs when
 # $PREFIX/tmp is not writable (Android 11+ can restrict access to /data/data/com.termux
 # paths), yielding a cryptic "/bin/bash: No such file or directory" (exit 127).
-# If proot is missing or unusable, drop to the native TermDeb shell with a message.
-if [ ! -x "${PROOT}" ] || ! "${PROOT}" --help >/dev/null 2>&1; then
-  echo "TermDeb: proot not usable at ${PROOT} - falling back to native TermDeb shell."
+# If proot is missing or unusable, show a clear error and drop to the native shell.
+if [ ! -x "${PROOT}" ]; then
+  echo "TermDeb: proot binary not found at ${PROOT}"
+  echo "TermDeb: The TermDeb app may not be installed correctly."
+  echo "TermDeb: Try reinstalling the app or running 'termux-reload-settings'."
+  echo "TermDeb: Falling back to native TermDeb shell."
+  exec "${TERMDEB_PREFIX}/bin/bash" --login
+fi
+
+# Check if proot actually works (some Android versions block it)
+if ! "${PROOT}" --help >/dev/null 2>&1; then
+  echo "TermDeb: proot at ${PROOT} is not working (possibly blocked by Android)."
+  echo "TermDeb: Falling back to native TermDeb shell."
   exec "${TERMDEB_PREFIX}/bin/bash" --login
 fi
 
