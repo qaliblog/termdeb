@@ -859,51 +859,53 @@ final class TermuxInstaller {
         new Thread() {
             @Override
             public void run() {
-                try {                        Logger.logInfo(LOG_TAG, "Installing TermDeb offline runtime...");
-
-                        // ---- Detect proot vs proot-distro capability ----
-                        // proot-distro: ships a bundled Python script that knows how to
-                        // launch distributions without a standalone proot binary.
-                        //        /data/data/com.qali.termdeb/files/usr/share/proot-distro/proot-distro.py
-                        // proot:       the standalone pre-PTTLS binary, optionally
-                        //       preloaded with libandroid-shmem for SHM. Bundled in the
-                        //       offline assets at termdeb-runtime/proot/bin/proot.
-                        //
-                        // If the assets contain a working proot-distro script we prefer
-                        // that path (it does not require a separate proot binary). If not,
-                        // we still support the legacy proot launch but the asset build
-                        // (prepareTermDebAssets) must have staged proot.
-                        //
-                        // NOTE: do not swap the runtime detection flag below. Downstream
-                        // callers (TermuxActivity, the shell scripts) rely on
-                        // TERMDEB_USES_PROOT_DISTRO for their own fallback/warning logic,
-                        // and the offline assets are built to satisfy whichever path is
-                        // selected at build time.
-                        String prootDistroScriptAsset = TERMDEB_PROOT_DISTRO_DIR + "/proot-distro.py";
-                        boolean hasProotDistroScript = false;
-                        try {
-                            hasProotDistroScript = context.getAssets().list(prootDistroScriptAsset.replace("/", "/")) != null
-                                && java.util.Arrays.stream(context.getAssets().list(prootDistroScriptAsset.replace("/", "/")))
-                                    .anyMatch(a -> a.endsWith("proot-distro.py"));
-                        } catch (Exception ignored) {}
-                        // Try a direct open to be certain (list() can be finicky on some API levels).
-                        if (!hasProotDistroScript) {
-                            try (java.io.InputStream s = context.getAssets().open(prootDistroScriptAsset)) {
-                                hasProotDistroScript = s != null && s.available() > 0;
-                            } catch (java.io.IOException ignored) {}
-                        }
-                        Logger.logInfo(LOG_TAG, "TermDeb proot-distro script present in assets: " + hasProotDistroScript);
-                        boolean usesProotDistro = hasProotDistroScript
-                            // Honour an explicit override from the build (e.g. when the assets
-                            // are incomplete and we still want to test the proot-distro code
-                            // path in CI).
-                            || Boolean.getBoolean("termdeb.useProotDistro");
-                        // Expose the decision to the shell scripts (written below with the
-                        // rest of TERMDEB_PATHS) and to downstream Java callers.
-                        Logger.logInfo(LOG_TAG, "TermDeb launch mode for this build: "
-                            + (usesProotDistro ? "proot-distro" : "proot"));
+                try {
+                    Logger.logInfo(LOG_TAG, "Installing TermDeb offline runtime...");
 
                     Context context = activity.getApplicationContext();
+
+                    // ---- Detect proot vs proot-distro capability ----
+                    // proot-distro: ships a bundled Python script that knows how to
+                    // launch distributions without a standalone proot binary.
+                    //        /data/data/com.qali.termdeb/files/usr/share/proot-distro/proot-distro.py
+                    // proot:       the standalone pre-PTTLS binary, optionally
+                    //       preloaded with libandroid-shmem for SHM. Bundled in the
+                    //       offline assets at termdeb-runtime/proot/bin/proot.
+                    //
+                    // If the assets contain a working proot-distro script we prefer
+                    // that path (it does not require a separate proot binary). If not,
+                    // we still support the legacy proot launch but the asset build
+                    // (prepareTermDebAssets) must have staged proot.
+                    //
+                    // NOTE: do not swap the runtime detection flag below. Downstream
+                    // callers (TermuxActivity, the shell scripts) rely on
+                    // TERMDEB_USES_PROOT_DISTRO for their own fallback/warning logic,
+                    // and the offline assets are built to satisfy whichever path is
+                    // selected at build time.
+                    String prootDistroScriptAsset = TERMDEB_PROOT_DISTRO_DIR + "/proot-distro.py";
+                    boolean hasProotDistroScript = false;
+                    try {
+                        hasProotDistroScript = context.getAssets().list(prootDistroScriptAsset.replace("/", "/")) != null
+                            && java.util.Arrays.stream(context.getAssets().list(prootDistroScriptAsset.replace("/", "/")))
+                                .anyMatch(a -> a.endsWith("proot-distro.py"));
+                    } catch (Exception ignored) {}
+                    // Try a direct open to be certain (list() can be finicky on some API levels).
+                    if (!hasProotDistroScript) {
+                        try (java.io.InputStream s = context.getAssets().open(prootDistroScriptAsset)) {
+                            hasProotDistroScript = s != null && s.available() > 0;
+                        } catch (java.io.IOException ignored) {}
+                    }
+                    Logger.logInfo(LOG_TAG, "TermDeb proot-distro script present in assets: " + hasProotDistroScript);
+                    boolean usesProotDistro = hasProotDistroScript
+                        // Honour an explicit override from the build (e.g. when the assets
+                        // are incomplete and we still want to test the proot-distro code
+                        // path in CI).
+                        || Boolean.getBoolean("termdeb.useProotDistro");
+                    // Expose the decision to the shell scripts (written below with the
+                    // rest of TERMDEB_PATHS) and to downstream Java callers.
+                    Logger.logInfo(LOG_TAG, "TermDeb launch mode for this build: "
+                        + (usesProotDistro ? "proot-distro" : "proot"));
+
                     File filesDir = context.getFilesDir();
                     File debianDir = new File(filesDir, "debian-root");
                     File readyMarker = new File(filesDir, ".termdeb-runtime-ready");
