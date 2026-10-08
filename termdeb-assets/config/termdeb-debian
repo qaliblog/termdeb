@@ -1,0 +1,168 @@
+#!/bin/bash
+# termdeb-debian - Enter Debian Linux (full userspace)
+#
+# Default login shell for TermDeb terminal sessions. Launches a complete Debian
+# ARM64 userspace with Box64 transparent x86_64 support. On first start it
+# provisions the guest (systemd, dbus, ca-certificates, locales) via apt. When
+# the device provides real root AND the kernel exposes the needed features it
+# runs Debian as a native chroot with systemd as PID 1 (termdeb-native);
+# otherwise it falls back to proot mode (no root required).
+#
+# To exit Debian and return to the native TermDeb shell:  termdeb-host
+# Diagnostics (systemd feasibility, kernel features):    termdeb-syscheck
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+# NOTE: paths derive from $PREFIX instead of ${ANDROID_DATA:-...}: Android
+# always sets ANDROID_DATA=/data, so the fallback would never trigger and
+# paths would resolve under /data instead of the app's data directory.
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+PROOT="${TERMDEB_PREFIX}/bin/proot"
+BOX64="${TERMDEB_PREFIX}/bin/box64"
+
+# Already inside the Debian guest (proot or native chroot)? Run a shell.
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ]; then
+  exec /bin/bash --login
+fi
+
+# Check if Debian rootfs exists
+if [ ! -d "${TERMDEB_UROOT}" ] || [ ! -f "${TERMDEB_UROOT}/etc/os-release" ]; then
+  echo "TermDeb: Debian rootfs not found at ${TERMDEB_UROOT}"
+  echo "TermDeb: Falling back to native TermDeb shell."
+  exec "${TERMDEB_PREFIX}/bin/bash" --login
+fi
+
+# First-start provisioning: install systemd, dbus, ca-certificates and locales
+# into the guest so the environment is a complete Debian userspace. Idempotent
+# and resumable - termdeb-provision writes /etc/termdeb-provisioned in the guest
+# on success and is retried on the next session start until then. Skip with
+# TERMDEB_SKIP_PROVISION=1.
+if [ "${TERMDEB_SKIP_PROVISION:-0}" != "1" ] && [ ! -f "${TERMDEB_UROOT}/etc/termdeb-provisioned" ]; then
+  echo "TermDeb: Provisioning Debian userspace (systemd, dbus, ca-certificates)..."
+  if [ -x "${TERMDEB_PREFIX}/bin/termdeb-provision" ]; then
+    "${TERMDEB_PREFIX}/bin/termdeb-provision"
+  fi
+fi
+
+# Export Box64 configuration
+# NOTE: STRONGMEM and BLEEDING_EDGE are deliberately NOT set: on-device
+# testing showed they hang some x86_64 binaries (e.g. Bun-compiled apps)
+# under the dynarec. The plain dynarec defaults run everything tested.
+export BOX64_DYNAREC=1
+export BOX64_DYNAREC_BIGBLOCK=1
+export BOX64_DYNAREC_SAFEFLAGS=1
+export BOX64_ENV=0
+export BOX64_NOBANNER=0
+
+# Native mode (systemd as PID 1) needs real root plus kernel features.
+# termdeb-native performs the capability checks, mounts and chroot+systemd
+# launch; it exits non-zero with diagnostics when the Android kernel cannot
+# support it, and we fall back to proot mode.
+# NOTE: real-root detection must NOT use `command -v su` - the Termux bootstrap
+# ships its own su script in $PREFIX/bin that grants no Android root.
+termdeb_has_root() {
+  [ "$(id -u)" = "0" ] && return 0
+  for p in /system/bin/su /system/xbin/su /sbin/su /vendor/bin/su /system/bin/magisk /data/adb/magisk/magisk /data/adb/ksu/bin/ksud; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+if termdeb_has_root; then
+  if [ -x "${TERMDEB_PREFIX}/bin/termdeb-native" ]; then
+    "${TERMDEB_PREFIX}/bin/termdeb-native"
+    native_status=$?
+    if [ "${TERMDEB_FORCE_NATIVE:-0}" = "1" ]; then
+      exit "$native_status"
+    fi
+    if [ "$native_status" -ne 0 ]; then
+      echo "TermDeb: native (systemd) launch unavailable, falling back to proot mode."
+      echo "TermDeb: run 'termdeb-syscheck' for systemd/kernel diagnostics."
+    fi
+  fi
+fi
+
+# Discover the Android SDK wherever it lives: termdeb-wrap64 locates it
+# regardless of the folder's name or location (env vars, any directory
+# containing build-tools, local.properties sdk.dir, /sdcard) - see
+# termdeb-wrap64 --print-sdk-roots. The roots are handed to the watcher below
+# so a freshly placed SDK gets real-time inotify coverage, not just the
+# periodic sweep.
+TERMDEB_SDK_ROOTS=""
+if [ -x "${TERMDEB_PREFIX}/bin/termdeb-wrap64" ]; then
+  TERMDEB_SDK_ROOTS=$("${TERMDEB_PREFIX}/bin/termdeb-wrap64" --print-sdk-roots 2>/dev/null | tr '\n' ' ')
+fi
+
+# Refresh the transparent Box64 layer (on the HOST, no proot/ptrace overhead):
+# wrap any x86_64 ELF executables under the home tree, /usr/local, /usr/bin,
+# the Gradle cache and the discovered SDK roots with ARM64 launchers so they
+# run through box64 - including as subprocesses of native ARM64 parents
+# (Gradle/JDK aapt2). Runs before the guest starts, so the environment is
+# always up to date on entry. (termdeb-wrap64 rediscovers the SDK itself.)
+if [ -x "${TERMDEB_PREFIX}/bin/termdeb-wrap64" ] && [ -f "${TERMDEB_UROOT}/etc/os-release" ]; then
+  "${TERMDEB_PREFIX}/bin/termdeb-wrap64" >/dev/null 2>&1 || true
+fi
+
+# Continuous Box64 wrap watcher (termdeb-wrapd): keeps the transparent layer
+# up to date while the session runs. Gradle/AGP re-extracts x86_64 tools
+# (aapt2, zipalign) into fresh ~/.gradle/caches/<ver>/transforms directories
+# during a build - the one-shot wrap above cannot see those. The watcher uses
+# inotify to wrap any new x86_64 ELF executable the instant it is written or
+# moved in, BEFORE the ARM64 JVM can spawn it, plus a periodic full sweep.
+# Discovered SDK roots are passed as CLI args so they are watched in real
+# time too (any name, any location). Single-instance (flock), backgrounded,
+# logs to the TermDeb tmp dir.
+if [ -x "${TERMDEB_PREFIX}/bin/termdeb-wrapd" ] && [ -f "${TERMDEB_UROOT}/etc/os-release" ]; then
+  # shellcheck disable=SC2086  # intentional word-splitting of SDK root list
+  nohup "${TERMDEB_PREFIX}/bin/termdeb-wrapd" ${TERMDEB_SDK_ROOTS} \
+    >"${TERMDEB_PREFIX}/tmp/termdeb-wrapd.log" 2>&1 &
+fi
+
+# Create bind sources
+mkdir -p "${TERMDEB_HOME}/storage" "${TERMDEB_PREFIX}/tmp" "${TERMDEB_PREFIX}/tmp/shm"
+
+# Source user ~/.bashrc at shell startup. The guest runs bash as a login
+# shell, which reads ~/.profile (not ~/.bashrc) - and /root inside the guest
+# is bind-mounted from ${TERMDEB_HOME}, which has no .profile. If the user
+# placed config in .bashrc (the conventional Debian location) it
+# silently never ran. Create a .profile that sources .bashrc, matching
+# Debian's default, but only if the user has not already provided their own
+# .profile or .bash_profile.
+if [ -f "${TERMDEB_HOME}/.bashrc" ] && \
+   [ ! -f "${TERMDEB_HOME}/.profile" ] && \
+   [ ! -f "${TERMDEB_HOME}/.bash_profile" ]; then
+    cat > "${TERMDEB_HOME}/.profile" <<'TERMDEB_PROFILE_EOF'
+# ~/.profile: executed by login shells. Source ~/.bashrc so the user's
+# interactive shell config (aliases, functions, exports) is applied at shell
+# startup, matching Debian's default ~/.profile behavior.
+if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+TERMDEB_PROFILE_EOF
+fi
+
+# Launch Debian via proot (no root required): complete Linux userspace with
+# /proc, /sys, /dev, /dev/pts, tmpfs-style /dev/shm, /run, /sdcard, storage,
+# DNS and Box64 all bound in. x86_64 binaries are routed through box64 by
+# termdeb-wrap64 (on-disk ARM64 launchers - see termdeb-wrap64), so no
+# LD_PRELOAD is needed and ARM64 processes are never touched.
+exec "${PROOT}" \
+  --link2symlink --kill-on-exit --root-id --cwd=/root \
+  -b /dev -b /proc -b /sys \
+  -b "${TERMDEB_HOME}:/root" \
+  -b "${TERMDEB_HOME}/storage:/mnt/storage" \
+  -b "/storage/emulated/0:/sdcard" \
+  -b "${TERMDEB_PREFIX}/tmp:/tmp" \
+  -b "${TERMDEB_PREFIX}/tmp/shm:/dev/shm" \
+  -b "${BOX64}:/usr/local/bin/box64" \
+  -b "${TERMDEB_PREFIX}/etc/resolv.conf:/etc/resolv.conf" \
+  -r "${TERMDEB_UROOT}" \
+  /usr/bin/env -i \
+  HOME=/root USER=root TERM="${TERM:-xterm-256color}" \
+  LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  BOX64_LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib64:/usr/lib64 \
+  BOX64_DYNAREC=1 BOX64_DYNAREC_BIGBLOCK=1 BOX64_DYNAREC_SAFEFLAGS=1 \
+  /bin/bash --login

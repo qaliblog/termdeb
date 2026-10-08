@@ -1,0 +1,307 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!DOCTYPE resources [
+    <!ENTITY TERMUX_PACKAGE_NAME "com.qali.termdeb">
+    <!ENTITY TERMUX_APP_NAME "TermDeb">
+    <!ENTITY TERMUX_API_APP_NAME "TermDeb:API">
+    <!ENTITY TERMUX_BOOT_APP_NAME "TermDeb:Boot">
+    <!ENTITY TERMUX_FLOAT_APP_NAME "TermDeb:Float">
+    <!ENTITY TERMUX_STYLING_APP_NAME "TermDeb:Styling">
+    <!ENTITY TERMUX_TASKER_APP_NAME "TermDeb:Tasker">
+    <!ENTITY TERMUX_WIDGET_APP_NAME "TermDeb:Widget">
+    ]>
+
+<resources>
+
+    <string name="application_name">&TERMUX_APP_NAME;</string>
+    <string name="shared_user_label">&TERMUX_APP_NAME; user</string>
+
+
+
+    <!-- Termux RUN_COMMAND permission -->
+    <string name="permission_run_command_label">Run commands in &TERMUX_APP_NAME; environment</string>
+    <string name="permission_run_command_description">execute arbitrary commands within &TERMUX_APP_NAME;
+        environment and access files</string>
+
+
+
+    <!-- Termux Bootstrap Packages Installation -->
+    <string name="bootstrap_installer_body">Installing bootstrap packages…</string>
+    <string name="bootstrap_error_title">Unable to install bootstrap</string>
+    <string name="bootstrap_error_body">&TERMUX_APP_NAME; was unable to install the bootstrap packages.</string>
+    <string name="bootstrap_error_abort">Abort</string>
+    <string name="bootstrap_error_try_again">Try again</string>
+    <string name="bootstrap_error_not_primary_user_message">&TERMUX_APP_NAME; can only be run as the primary user.
+        \nBootstrap binaries compiled for &TERMUX_APP_NAME; have hardcoded $PREFIX path and cannot be installed
+        under any path other than:\n%1$s.</string>
+    <string name="bootstrap_error_installed_on_portable_sd">&TERMUX_APP_NAME; cannot be installed on
+        portable/external/removable sd card on your device.
+        \nBootstrap binaries compiled for &TERMUX_APP_NAME; have hardcoded $PREFIX path and cannot be installed
+        under any path other than:\n%1$s.</string>
+
+
+
+    <!-- Terminal Sidebar and Shortcuts -->
+    <string name="action_new_session">New session</string>
+    <string name="action_new_session_failsafe">Failsafe</string>
+    <string name="title_max_terminals_reached">Max terminals reached</string>
+    <string name="msg_max_terminals_reached">Close down existing ones before creating new.</string>
+
+    <string name="title_rename_session">Set session name</string>
+    <string name="action_rename_session_confirm">Set</string>
+    <string name="title_create_named_session">New named session</string>
+    <string name="action_create_named_session_confirm">Create</string>
+
+    <string name="action_toggle_soft_keyboard">Keyboard</string>
+
+    <string name="msg_enabling_terminal_toolbar">Enabling Terminal Toolbar</string>
+    <string name="msg_disabling_terminal_toolbar">Disabling Terminal Toolbar</string>
+
+
+
+    <!-- Terminal Popup -->
+    <string name="action_select_url">Select URL</string>
+    <string name="title_select_url_dialog">Click URL to copy or long press to open</string>
+    <string name="title_select_url_none_found">No URL found in the terminal.</string>
+    <string name="msg_select_url_copied_to_clipboard">URL copied to clipboard</string>
+
+    <string name="action_share_transcript">Share transcript</string>
+    <string name="title_share_transcript">Terminal transcript</string>
+    <string name="title_share_transcript_with">Send transcript to:</string>
+
+    <string name="action_share_selected_text">Share selected text</string>
+    <string name="title_share_selected_text">Terminal Text</string>
+    <string name="title_share_selected_text_with">Send selected text to:</string>
+
+    <string name="action_autofill_username">Autofill username</string>
+    <string name="action_autofill_password">Autofill password</string>
+
+    <string name="action_reset_terminal">Reset</string>
+    <string name="msg_terminal_reset">Terminal reset</string>
+
+    <string name="action_kill_process">Kill process (%d)</string>
+    <string name="title_confirm_kill_process">Really kill this session?</string>
+
+    <string name="action_style_terminal">Style</string>
+    <string name="action_toggle_keep_screen_on">Keep screen on</string>
+    <string name="action_open_help">Help</string>
+    <string name="action_open_settings">Settings</string>
+
+    <string name="action_report_issue">Report Issue</string>
+    <string name="msg_generating_report">Generating Report</string>
+    <string name="msg_add_termux_debug_info">Add termux debug info to report?</string>
+
+    <string name="error_styling_not_installed">The &TERMUX_STYLING_APP_NAME; Plugin App is not installed.</string>
+    <string name="action_styling_install">Install</string>
+
+
+
+    <!-- Termux Notifications -->
+    <string name="notification_action_exit">Exit</string>
+    <string name="notification_action_wake_lock">Acquire wakelock</string>
+    <string name="notification_action_wake_unlock">Release wakelock</string>
+
+
+
+    <!-- TermuxService -->
+    <string name="error_display_over_other_apps_permission_not_granted_to_start_terminal">&TERMUX_APP_NAME; requires
+        \"Display over other apps\" permission to start terminal sessions from background on Android >= 10.
+        Grants it from Settings -> Apps -> &TERMUX_APP_NAME; -> Advanced</string>
+    <string name="error_termux_service_invalid_execution_command_runner">Invalid execution command runner to TermuxService: `%1$s`</string>
+    <string name="error_termux_service_unsupported_execution_command_runner">Unsupported execution command runner to TermuxService: `%1$s`</string>
+    <string name="error_termux_service_unsupported_execution_command_shell_create_mode">Unsupported execution command shell create mode to TermuxService: `%1$s`</string>
+    <string name="error_termux_service_execution_command_shell_name_unset">Shell name not set but `%1$s` shell create mode passed</string>
+
+
+
+    <!-- Termux RunCommandService -->
+    <string name="error_run_command_service_invalid_intent_action">Invalid intent action to RunCommandService: `%1$s`</string>
+    <string name="error_run_command_service_invalid_execution_command_runner">Invalid execution command runner to RunCommandService: `%1$s`</string>
+    <string name="error_run_command_service_mandatory_extra_missing">Mandatory extra missing to RunCommandService: \"%1$s\"</string>
+    <string name="error_run_command_service_api_help">Visit %1$s for more info on RUN_COMMAND Intent usage.</string>
+
+
+
+    <!-- Termux File Receiver -->
+    <string name="title_file_received">Save file in ~/downloads/</string>
+    <string name="action_file_received_edit">Edit</string>
+    <string name="action_file_received_open_directory">Open directory</string>
+
+
+
+    <!-- Miscellaneous -->
+    <string name="error_termux_service_start_failed_general">Failed to start TermuxService. Check logcat for exception message.</string>
+    <string name="error_termux_service_start_failed_bg">Failed to start TermuxService while app is in background due to android bg restrictions.</string>
+
+
+
+    <!-- Termux Settings -->
+    <string name="title_activity_termux_settings">&TERMUX_APP_NAME; Settings</string>
+
+    <!-- Termux App Preferences -->
+    <string name="termux_preferences_title">&TERMUX_APP_NAME;</string>
+    <string name="termux_preferences_summary">Preferences for &TERMUX_APP_NAME; app</string>
+
+        <!-- ADB & Wireless Debugging Preferences -->
+        <string name="adb_preferences_title">ADB &amp; Wireless Debugging</string>
+        <string name="adb_preferences_summary">Network ADB transports, pairing and status</string>
+
+            <!-- ADB Status Category -->
+            <string name="adb_status_header">Status</string>
+            <string name="adb_status_title">ADB Status</string>
+            <string name="adb_status_unconfigured">Not configured</string>
+            <string name="adb_status_saved_endpoint">Saved endpoint — use “Connect” to reconnect</string>
+            <string name="adb_status_connected">Connected</string>
+            <string name="adb_status_connecting">Connecting…</string>
+            <string name="adb_status_disconnected">Disconnected</string>
+            <string name="adb_status_error">Error</string>
+            <string name="adb_status_working">Working…</string>
+            <string name="adb_device_title">Device</string>
+            <string name="adb_value_none">None</string>
+            <string name="adb_enabled_title">ADB network transports</string>
+            <string name="adb_enabled_off">Disabled — guest `adb connect` will fail</string>
+            <string name="adb_enabled_on">Enabled — guest `adb connect` may reach remote adbd</string>
+            <string name="adb_auto_reconnect_title">Automatic reconnect</string>
+            <string name="adb_auto_reconnect_off">Stay disconnected until manually reconnected</string>
+            <string name="adb_auto_reconnect_on">Reconnect automatically with exponential backoff (1s–30s)</string>
+
+            <!-- ADB Actions Category -->
+            <string name="adb_actions_header">Actions</string>
+            <string name="adb_connect_title">Connect</string>
+            <string name="adb_connect_summary">Connect to the saved endpoint (set by the last `adb connect host:port`)</string>
+            <string name="adb_disconnect_title">Disconnect</string>
+            <string name="adb_disconnect_summary">Drop all network ADB transports</string>
+            <string name="adb_refresh_title">Refresh Status</string>
+
+            <!-- ADB About Category -->
+            <string name="adb_about_header">About</string>
+            <string name="adb_public_key_title">ADB Public Key</string>
+            <string name="adb_public_key_summary">Show the RSA public key remote devices must authorize</string>
+            <string name="adb_public_key_prefix">Public key:</string>
+            <string name="adb_pairing_note_title">Pairing</string>
+            <string name="adb_pairing_note_summary">Wireless Debugging pairing (Android 11+, SPAKE2+ over TLS 1.3) is supported: use `adb pair HOST:PAIRING_PORT` in the terminal or the Pair action below, then `adb connect HOST:ADB_PORT`. Legacy TCP/IP devices (adb tcpip 5555) use classic RSA authorization — accept the RSA dialog on the target device.</string>
+            <string name="adb_wireless_header">Wireless Debugging</string>
+            <string name="adb_wireless_status_title">Wireless Status</string>
+            <string name="adb_wireless_not_paired">Not paired — pair from the device’s “Pair device with pairing code” screen</string>
+            <string name="adb_wireless_paired">Paired (not connected)</string>
+            <string name="adb_wireless_connecting">Connecting…</string>
+            <string name="adb_wireless_connected">Connected</string>
+            <string name="adb_wireless_error">Error</string>
+            <string name="adb_wireless_pair_title">Pair device</string>
+            <string name="adb_wireless_pair_summary">Enter the device IP, pairing port and 6-digit code from “Pair device with pairing code”</string>
+            <string name="adb_wireless_enable_no_wifi_title">Enable Wireless Debugging (no Wi-Fi)</string>
+            <string name="adb_wireless_enable_no_wifi_summary">Turn this device’s Wireless Debugging on without Wi-Fi (needs WRITE_SECURE_SETTINGS; mobile data is not interrupted)</string>
+            <string name="adb_wireless_connect_title">Connect</string>
+            <string name="adb_wireless_connect_summary">Connect to the last paired device’s Wireless Debugging port</string>
+            <string name="adb_wireless_disconnect_title">Disconnect</string>
+            <string name="adb_wireless_disconnect_summary">Drop all Wireless Debugging transports</string>
+            <string name="adb_wireless_discover_title">Discover devices</string>
+            <string name="adb_wireless_discover_summary">Search the network for Wireless Debugging services (mDNS)</string>
+            <string name="adb_wireless_forget_title">Forget pairing</string>
+            <string name="adb_wireless_forget_summary">Remove saved Wireless Debugging pairing records</string>
+            <string name="adb_wireless_ip">IP / Host</string>
+            <string name="adb_wireless_pairing_port">Pairing port</string>
+            <string name="adb_wireless_adb_port">ADB port (optional — from “Wireless debugging”)</string>
+            <string name="adb_wireless_port_unknown">ADB port unknown — use Discover or pair again with the ADB port filled in</string>
+            <string name="adb_wireless_pairing_code">Pairing code (6 digits)</string>
+            <string name="adb_wireless_pair_button">Pair</string>
+            <string name="adb_wireless_cancel_button">Cancel</string>
+            <string name="adb_wireless_discover_none">No Wireless Debugging services found — enter the address manually</string>
+            <string name="adb_wireless_discover_failed">Discovery unavailable on this device</string>
+            <string name="adb_error_key">Error loading ADB key: %1$s</string>
+            <string name="adb_error_generic">Error: %1$s</string>
+
+        <!-- Debugging Preferences -->
+        <string name="termux_debugging_preferences_title">Debugging</string>
+        <string name="termux_debugging_preferences_summary">Preferences for debugging</string>
+
+            <!-- Logging Category -->
+            <string name="termux_logging_header">Logging</string>
+
+                <!-- Log Level -->
+                <string name="termux_log_level_title">Log Level</string>
+
+                <!-- Terminal View Key Logging -->
+                <string name="termux_terminal_view_key_logging_enabled_title">Terminal View Key Logging</string>
+                <string name="termux_terminal_view_key_logging_enabled_off">Logs will not have entries for terminal view keys. (Default)</string>
+                <string name="termux_terminal_view_key_logging_enabled_on">Logcat logs will have entries for terminal view keys.
+                    These are very verbose and should be disabled under normal circumstances or will cause performance issues.</string>
+
+                <!-- Plugin Error Notifications -->
+                <string name="termux_plugin_error_notifications_enabled_title">Plugin Error Notifications</string>
+                <string name="termux_plugin_error_notifications_enabled_off">Disable flashes and notifications for plugin errors.</string>
+                <string name="termux_plugin_error_notifications_enabled_on">Show flashes and notifications for plugin errors. (Default)</string>
+
+                <!-- Crash Report Notifications -->
+                <string name="termux_crash_report_notifications_enabled_title">Crash Report Notifications</string>
+                <string name="termux_crash_report_notifications_enabled_off">Disable notifications for crash reports.</string>
+                <string name="termux_crash_report_notifications_enabled_on">Show notifications for crash reports. (Default)</string>
+
+
+        <!-- Terminal IO Preferences -->
+        <string name="termux_terminal_io_preferences_title">Terminal I/O</string>
+        <string name="termux_terminal_io_preferences_summary">Preferences for terminal I/O</string>
+
+            <!-- Keyboard Category -->
+            <string name="termux_keyboard_header">Keyboard</string>
+
+                <!-- Soft Keyboard -->
+                <string name="termux_soft_keyboard_enabled_title">Soft Keyboard Enabled</string>
+                <string name="termux_soft_keyboard_enabled_off">Soft keyboard will be disabled.</string>
+                <string name="termux_soft_keyboard_enabled_on">Soft keyboard will be enabled. (Default)</string>
+
+                <!-- Soft Keyboard Only If No Hardware-->
+                <string name="termux_soft_keyboard_enabled_only_if_no_hardware_title">Soft Keyboard Only If No Hardware</string>
+                <string name="termux_soft_keyboard_enabled_only_if_no_hardware_off">Soft keyboard will be enabled even if
+                    hardware keyboard is connected. (Default)</string>
+                <string name="termux_soft_keyboard_enabled_only_if_no_hardware_on">Soft keyboard will be enabled only if
+                    no hardware keyboard is connected.</string>
+
+
+        <!-- Terminal View Preferences -->
+        <string name="termux_terminal_view_preferences_title">Terminal View</string>
+        <string name="termux_terminal_view_preferences_summary">Preferences for terminal view</string>
+
+            <!-- View Category -->
+            <string name="termux_terminal_view_view_header">View</string>
+
+                <!-- Terminal View Margin Adjustment -->
+                <string name="termux_terminal_view_terminal_margin_adjustment_title">Terminal Margin Adjustment</string>
+                <string name="termux_terminal_view_terminal_margin_adjustment_off">Terminal margin adjustment will be disabled.</string>
+                <string name="termux_terminal_view_terminal_margin_adjustment_on">Terminal margin adjustment will be enabled.
+                    It should be enabled to try to fix the issue where soft keyboard covers part of extra keys/terminal view.
+                    If it causes screen flickering on your devices, then disable it. (Default)</string>
+
+
+
+    <!-- Termux:API App Preferences -->
+    <string name="termux_api_preferences_title">&TERMUX_API_APP_NAME;</string>
+    <string name="termux_api_preferences_summary">Preferences for &TERMUX_API_APP_NAME; app</string>
+
+
+
+    <!-- Termux:Float App Preferences -->
+    <string name="termux_float_preferences_title">&TERMUX_FLOAT_APP_NAME;</string>
+    <string name="termux_float_preferences_summary">Preferences for &TERMUX_FLOAT_APP_NAME; app</string>
+
+
+
+    <!-- Termux:Tasker App Preferences -->
+    <string name="termux_tasker_preferences_title">&TERMUX_TASKER_APP_NAME;</string>
+    <string name="termux_tasker_preferences_summary">Preferences for &TERMUX_TASKER_APP_NAME; app</string>
+
+
+
+    <!-- Termux:Widget App Preferences -->
+    <string name="termux_widget_preferences_title">&TERMUX_WIDGET_APP_NAME;</string>
+    <string name="termux_widget_preferences_summary">Preferences for &TERMUX_WIDGET_APP_NAME; app</string>
+
+
+
+    <!-- About Preference -->
+    <string name="about_preference_title">About</string>
+
+    <!-- Donate Preference -->
+    <string name="donate_preference_title">Donate</string>
+
+</resources>

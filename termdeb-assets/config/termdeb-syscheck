@@ -1,0 +1,93 @@
+#!/bin/bash
+# termdeb-syscheck - TermDeb runtime & systemd capability diagnostics
+#
+# Context-aware: when run inside the Debian guest it reports guest state; when
+# run on the host it reports the device capabilities that decide whether
+# systemd can run as PID 1 (native mode) or whether TermDeb must fall back to
+# proot mode.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+# ---- Inside the Debian guest? ----
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ] && [ -x /usr/bin/apt-get ]; then
+  echo "=== TermDeb Guest Diagnostics ==="
+  . /etc/os-release 2>/dev/null
+  echo "Debian:            ${PRETTY_NAME:-unknown}"
+  echo "Kernel (host):     $(uname -r) $(uname -m)"
+  echo "PID 1:             $(cat /proc/1/comm 2>/dev/null || echo unknown)"
+  echo "systemd binary:    $(test -x /usr/lib/systemd/systemd && echo present || echo 'missing (provisioning pending)')"
+  echo "systemd running:   $(test -d /run/systemd/system && echo yes || echo no)"
+  if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    echo "systemd version:   $(systemctl --version 2>/dev/null | head -1)"
+  fi
+  echo "/proc:              $(mountpoint -q /proc 2>/dev/null && echo mounted || echo 'not mounted')"
+  echo "/sys/fs/cgroup:     $(test -d /sys/fs/cgroup && echo present || echo missing)"
+  echo "Box64:             $(/usr/local/bin/box64 --version 2>&1 | head -1 || echo 'not runnable')"
+  echo "Box64 layer:       $(test -x /usr/local/libexec/termdeb-x86_64-launcher && test -x /usr/local/bin/termdeb-wrap64 && echo 'on-disk wrapping (termdeb-wrap64)' || echo 'NOT INSTALLED')"
+  echo "Wrap watcher:      $(test -x /usr/local/libexec/termdeb-wrapd && (pgrep -f termdeb-wrapd >/dev/null 2>&1 && echo 'running (termdeb-wrapd, inotify)' || echo 'installed (not running)') || echo MISSING)"
+  echo "Wrapped x86_64:    $(find /root /opt /usr/local -name '.termdeb-x86_64' -type d 2>/dev/null | wc -l) dir(s) (launcher replaces each x86_64 binary)"
+  echo "LD_PRELOAD:        ${LD_PRELOAD:-none (clean - no global interposer)}"
+  echo "x86_64 glibc libs: $(test -f /usr/lib/x86_64-linux-gnu/libc.so.6 && echo present || echo MISSING)"
+  echo "DNS:               $(getent hosts deb.debian.org >/dev/null 2>&1 && echo working || echo FAILING)"
+  echo "apt:               $(test -x /usr/bin/apt-get && echo present || echo missing)"
+  exit 0
+fi
+
+# ---- Host context ----
+# NOTE: paths derive from $PREFIX instead of ${ANDROID_DATA:-...}: Android
+# always sets ANDROID_DATA=/data, so the fallback would never trigger and
+# paths would resolve under /data instead of the app's data directory.
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+
+# Real-root detection: uid 0 or a known Android root binary. Do NOT use
+# `command -v su` - the Termux bootstrap ships its own su script in $PREFIX/bin
+# (a termux-user switch, not an Android root grant), so a bare su lookup always
+# succeeds and would misreport the device as rooted.
+termdeb_has_root() {
+  [ "$(id -u)" = "0" ] && return 0
+  for p in /system/bin/su /system/xbin/su /sbin/su /vendor/bin/su /system/bin/magisk /data/adb/magisk/magisk /data/adb/ksu/bin/ksud; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+echo "=== TermDeb Runtime Diagnostics ==="
+echo "User:              uid=$(id -u) ($(id -un 2>/dev/null || echo '?'))"
+if [ "$(id -u)" = "0" ]; then
+  ROOT_LINE="yes (process is root)"
+elif termdeb_has_root; then
+  ROOT_LINE="yes (su/magisk available)"
+else
+  ROOT_LINE="no (no root on this device - systemd unavailable)"
+fi
+echo "Root (su):         $ROOT_LINE"
+echo "Kernel:            $(uname -r) $(uname -m)"
+echo "SELinux:           $(getenforce 2>/dev/null || echo 'not readable')"
+echo "Cgroup v2:         $(test -f /sys/fs/cgroup/cgroup.controllers && echo present || echo absent)"
+echo "PID namespaces:    $(unshare --pid --fork true 2>/dev/null && echo available || echo 'NOT available (Android blocks unshare)')"
+echo "Mount capability:  $(test -w /proc/sys && echo 'writable /proc/sys' || echo 'not writable (no mount capability)')"
+echo "Debian rootfs:     $(test -f ${TERMDEB_UROOT}/etc/os-release && echo present || echo MISSING)"
+echo "Merged /usr:       $(test -L ${TERMDEB_UROOT}/bin && test -L ${TERMDEB_UROOT}/lib64 && echo ok || echo 'incomplete')"
+echo "Guest DNS:         $(test -s ${TERMDEB_UROOT}/etc/resolv.conf && echo configured || echo EMPTY)"
+echo "systemd (guest):   $(test -x ${TERMDEB_UROOT}/usr/lib/systemd/systemd && echo installed || echo 'not yet (provision on next Debian start)')"
+echo "Box64 (host):      $(test -x ${TERMDEB_PREFIX}/bin/box64 && echo present || echo MISSING)"
+echo "Wrap watcher:      $(test -x ${TERMDEB_PREFIX}/bin/termdeb-wrapd && (pgrep -f termdeb-wrapd >/dev/null 2>&1 && echo 'running (termdeb-wrapd, inotify)' || echo 'installed (not running)') || echo MISSING)"
+echo "proot:             $(test -x ${TERMDEB_PREFIX}/bin/proot && echo present || echo MISSING)"
+echo ""
+if termdeb_has_root; then
+  if test -f /sys/fs/cgroup/cgroup.controllers && unshare --pid --fork true 2>/dev/null; then
+    echo "SYSTEMD: AVAILABLE - TermDeb starts Debian with systemd as PID 1 (native mode)."
+  else
+    echo "SYSTEMD: NOT AVAILABLE - root exists but the kernel blocks PID namespaces or cgroups."
+    echo "  TermDeb uses proot mode instead. Unlock/root your device for systemd."
+  fi
+else
+  echo "SYSTEMD: NOT AVAILABLE - no root on this device; Android keeps apps unprivileged."
+  echo "  TermDeb uses proot mode (full Debian userspace, no systemd)."
+  echo "  To get systemd: root the device (Magisk/KernelSU) and grant TermDeb root."
+fi
+exit 0

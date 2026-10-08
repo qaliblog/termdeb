@@ -1,0 +1,537 @@
+{
+  "_comment": "TermDeb Asset Manifest - Verified upstream sources with pinned versions",
+  "_schema_version": "1.2.0",
+  "bootstrap": {
+    "description": "Termux bootstrap packages for the TermDeb prefix",
+    "version": "2026.02.12-r1+apt.android-7",
+    "url_pattern": "https://github.com/termux/termux-packages/releases/download/bootstrap-{version}/bootstrap-{arch}.zip",
+    "architecture": "multi-arch",
+    "compression": "zip",
+    "required_for_offline": true,
+    "license": "MIT",
+    "license_url": "https://github.com/termux/termux-packages/blob/master/LICENSE.txt",
+    "source": "https://github.com/termux/termux-packages",
+    "variants": {
+      "aarch64": {
+        "url": "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.02.12-r1%2Bapt.android-7/bootstrap-aarch64.zip",
+        "sha256": "ea2aeba8819e517db711f8c32369e89e7c52cee73e07930ff91185e1ab93f4f3",
+        "filename": "bootstrap-aarch64.zip",
+        "size_estimate_mb": 30
+      }
+    },
+    "destination": "bootstrap/{arch}.zip",
+    "extract_to": "bootstrap/"
+  },
+  "proot-distro": {
+    "description": "proot-distro - utility for managing proot distributions",
+    "version": "5.8.0",
+    "commit": "f832a56f2e8aab659a915600598b5321996aad78",
+    "url": "https://github.com/termux/proot-distro/archive/refs/tags/v5.8.0.tar.gz",
+    "sha256": null,
+    "filename": "proot-distro-5.8.0.tar.gz",
+    "architecture": "all",
+    "compression": "tar.gz",
+    "required_for_offline": true,
+    "license": "MIT",
+    "license_url": "https://github.com/termux/proot-distro/blob/master/LICENSE",
+    "source": "https://github.com/termux/proot-distro",
+    "install_method": "copy_source_tree",
+    "notes": "proot is already included in the Termux bootstrap. This package provides the distro management scripts."
+  },
+  "debian": {
+    "description": "Debian 13 (trixie) ARM64 base rootfs (official debuerreotype rootfs tarball)",
+    "version": "trixie",
+    "url": "https://github.com/debuerreotype/docker-debian-artifacts/raw/dist-arm64v8/trixie/oci/blobs/rootfs.tar.gz",
+    "sha256": null,
+    "filename": "debian-trixie-arm64-rootfs.tar.gz",
+    "architecture": "arm64",
+    "compression": "tar.gz",
+    "required_for_offline": true,
+    "license": "BSD-3-Clause / GPL-2.0+ (Debian)",
+    "license_url": "https://www.debian.org/legal/licenses/",
+    "source": "https://github.com/debuerreotype/docker-debian-artifacts",
+    "install_method": "direct_download",
+    "notes": "Official Debian 13 (trixie) ARM64 rootfs from debuerreotype/docker-debian-artifacts - the reproducible rootfs that backs the official Docker debian:trixie image. Downloaded directly; no Docker required on the build machine. sha256 is intentionally null because the dist-arm64v8 branch is refreshed upstream (a pinned hash would break the build whenever Debian rolls the image)."
+  },
+  "proot": {
+    "description": "Termux proot binary and its runtime libraries (libandroid-shmem, libtalloc). proot is NOT part of the core Termux bootstrap, so it must be bundled separately for the offline runtime.",
+    "version": "5.1.107.92",
+    "architecture": "arm64",
+    "install_method": "prebuilt_deb",
+    "required_for_offline": true,
+    "license": "GPL-2.0",
+    "license_url": "https://github.com/termux/proot/blob/master/COPYING",
+    "source": "https://packages.termux.dev/apt/termux-main/",
+    "notes": "Extracted from the official Termux apt repository. The proot binary needs libtalloc.so.2 and libandroid-shmem.so in $PREFIX/lib, and its loaders in $PREFIX/libexec/proot/.",
+    "packages": [
+      {
+        "name": "proot",
+        "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.92_aarch64.deb",
+        "sha256": "1f1c983509701f6826f568482c70673ee453a9ba38c9f5fa445a472d6b7524e9",
+        "filename": "pool/main/p/proot/proot_5.1.107.92_aarch64.deb"
+      },
+      {
+        "name": "libandroid-shmem",
+        "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_aarch64.deb",
+        "sha256": "0da3a24d558b93c92bcf8d611e0826a99ff96e396b148e6cdf33b47c47c57ff6",
+        "filename": "libandroid-shmem_0.7_aarch64.deb"
+      },
+      {
+        "name": "libtalloc",
+        "url": "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_aarch64.deb",
+        "sha256": "ac81ad623d74c209718b9f3acb2dd702cc8a88c431e820d212229910b4db29da",
+        "filename": "libtalloc_2.4.3_aarch64.deb"
+      }
+    ]
+  },
+  "box64": {
+    "description": "Box64 - Linux userspace x86_64 emulator for ARM64, prebuilt for glibc (runs inside the Debian trixie proot rootfs). Patched build: MAP_FIXED for fixed-address (ET_EXEC) ELF pre-reserve so huge non-PIE binaries (Bun-compiled apps like opencode) load at their required address on Android kernels that ignore low mmap hints.",
+    "version": "0.4.5-local-patched (built from ptitSeb/box64 main, 2026-08-22)",
+    "source": "local build (termdeb-assets/prebuilt/box64/build-box64.sh + box64-mapfixed.patch)",
+    "source_repo": "https://github.com/ptitSeb/box64",
+    "build_method": "local_build",
+    "patch": "box64-mapfixed.patch",
+    "build_script": "build-box64.sh",
+    "target_abi": "arm64",
+    "notes": "Built in-guest (Ubuntu aarch64) with -DBAD_SIGNAL=ON -DARM_DYNAREC=ON -DBOX32=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo, then llvm-stripped. The binary is committed at termdeb-assets/prebuilt/box64/box64 and the asset pipeline copies it into the APK (it only falls back to the stock deb download when absent), so CI and public releases ship the patched build. See termdeb-assets/prebuilt/box64/ for source, patch, and rebuild instructions.",
+    "required_for_offline": true,
+    "license": "MIT",
+    "license_url": "https://github.com/ptitSeb/box64/blob/main/LICENSE"
+  },
+  "box64-libs": {
+    "description": "x86_64 glibc runtime libraries (Ubuntu 24.04 amd64) extracted from official Ubuntu archive .debs. Covers libc, libgcc_s, libstdc++, zlib, openssl, curl, zstd, xz, bzip2, lz4, ffi, pcre/pcre2, expat, sqlite, xml2, ncurses/readline/edit, gmp/mpfr/mpc, atomic, uuid, png/jpeg/webp/tiff, freetype, fontconfig, glib, brotli, gnutls (idn2/unistring/psl/tasn1/nettle/hogweed/p11-kit), cap, X11/Xext/Xrender/Xrandr/Xi/Xfixes/Xinerama/Xcursor/Xkbcommon, wayland, icu, double-conversion, harfbuzz.",
+    "version": "libc6 2.39-0ubuntu8.9 + gcc-14 14.2.0-4ubuntu2~24.04.1 + 54 core/commonly-used x86_64 libraries",
+    "architecture": "amd64 (for x86_64 emulation under box64)",
+    "install_method": "prebuilt_deb_extract",
+    "required_for_offline": true,
+    "license": "LGPL-2.1+ / GPL-3+ / MIT (zlib)",
+    "license_url": "https://launchpad.net/ubuntu/+source/glibc",
+    "source": "https://archive.ubuntu.com/ubuntu/",
+    "_note": "These x86_64 glibc runtime libraries are independent of the ARM64 guest distro: they only satisfy the emulated x86_64 binaries that box64 runs, so they stay on Ubuntu 24.04 amd64 while the ARM64 rootfs is Debian trixie.",
+    "notes": "Extracted with dpkg-deb and packed as a tar.gz with paths relative to the guest root (lib/, lib64/). lib64/ld-linux-x86-64.so.2 is stored as a real file because assets cannot carry symlinks reliably.",
+    "packages": [
+      {
+        "name": "libc6",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/glibc/libc6_2.39-0ubuntu8.9_amd64.deb",
+        "sha256": "ff5557d99b51f761c4b7c92368b9cc45565eda17df9bf9eb4b134d09825008be",
+        "filename": "libc6_2.39-0ubuntu8.9_amd64.deb"
+      },
+      {
+        "name": "libgcc-s1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-14/libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb",
+        "sha256": "aa7fadbe33b78bcf99885318040601c550c208929565b179891d9a3cc2aa68cd",
+        "filename": "libgcc-s1_14.2.0-4ubuntu2~24.04.1_amd64.deb"
+      },
+      {
+        "name": "libstdc++6",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-14/libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb",
+        "sha256": "a51f8de7829211db961a31f02158058ad1a95f92ac6d0a5dff6350e2821c54c0",
+        "filename": "libstdc++6_14.2.0-4ubuntu2~24.04.1_amd64.deb"
+      },
+      {
+        "name": "zlib1g",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/z/zlib/zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb",
+        "sha256": "84b9cf5752b29c9f92c27cd4c4ba9bbcc70b5ccf9b1b515421a28ae23212e273",
+        "filename": "zlib1g_1.3.dfsg-3.1ubuntu2.2_amd64.deb"
+      },
+      {
+        "name": "libssl3t64",
+        "version": "3.0.13-0ubuntu3.12",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/o/openssl/libssl3t64_3.0.13-0ubuntu3.15_amd64.deb",
+        "sha256": "3d0955bc049bbcca0f4c3e78a3a8b994593d96db7d84f4320217224433844534",
+        "filename": "libssl3t64_3.0.13-0ubuntu3.15_amd64.deb"
+      },
+      {
+        "name": "libcurl4t64",
+        "version": "8.5.0-2ubuntu10.12",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/c/curl/libcurl4t64_8.5.0-2ubuntu10.13_amd64.deb",
+        "sha256": "92347d034fdae018d67cab3cbe976255ec0ba936f57923241974bf3787addf04",
+        "filename": "libcurl4t64_8.5.0-2ubuntu10.13_amd64.deb"
+      },
+      {
+        "name": "libzstd1",
+        "version": "1.5.5+dfsg2-2build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libz/libzstd/libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb",
+        "sha256": "dfcf25061e07aad7efd3f4f880ba5ad4d4d09ebe7fc8cc77ab6b8a161d6d4727",
+        "filename": "libzstd1_1.5.5+dfsg2-2build1.1_amd64.deb"
+      },
+      {
+        "name": "liblzma5",
+        "version": "5.6.1+really5.4.5-1ubuntu0.3",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/x/xz-utils/liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb",
+        "sha256": "d2eabd41ca77d2c2dd9d5d4ef478cccb64ffde6279c47cf4699a857d46785a52",
+        "filename": "liblzma5_5.6.1+really5.4.5-1ubuntu0.3_amd64.deb"
+      },
+      {
+        "name": "libbz2-1.0",
+        "version": "1.0.8-5.1build0.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/bzip2/libbz2-1.0_1.0.8-5.1build0.1_amd64.deb",
+        "sha256": "d557ab12b42ab370249142099fae3cbb979948934e4dfa58c2ab59bf5bbbda73",
+        "filename": "libbz2-1.0_1.0.8-5.1build0.1_amd64.deb"
+      },
+      {
+        "name": "liblz4-1",
+        "version": "1.9.4-1build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/l/lz4/liblz4-1_1.9.4-1build1.1_amd64.deb",
+        "sha256": "319331270d5cc52d5ebffe51c941d7b01b432bc402c2924b557209a64d4ecbad",
+        "filename": "liblz4-1_1.9.4-1build1.1_amd64.deb"
+      },
+      {
+        "name": "libffi8",
+        "version": "3.4.6-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libf/libffi/libffi8_3.4.6-1build1_amd64.deb",
+        "sha256": "637e6a7744de08cd331a41f4efd0d24e6ea9064843dea9d1c6ca87bdb5f038a2",
+        "filename": "libffi8_3.4.6-1build1_amd64.deb"
+      },
+      {
+        "name": "libpcre2-8-0",
+        "version": "10.42-4ubuntu2.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/pcre2/libpcre2-8-0_10.42-4ubuntu2.1_amd64.deb",
+        "sha256": "110a797a57673d3ee497a141cf988199258058c57525799c63194d81822529a0",
+        "filename": "libpcre2-8-0_10.42-4ubuntu2.1_amd64.deb"
+      },
+      {
+        "name": "libpcre3",
+        "version": "2:8.39-15build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/p/pcre3/libpcre3_8.39-15build1_amd64.deb",
+        "sha256": "62b2ea8d178a59495df00b777660377e0fb8d716be3fc552439796f77f515d43",
+        "filename": "libpcre3_2:8.39-15build1_amd64.deb"
+      },
+      {
+        "name": "libexpat1",
+        "version": "2.6.1-2ubuntu0.4",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/e/expat/libexpat1_2.6.1-2ubuntu0.4_amd64.deb",
+        "sha256": "126a5612e652bdc2edee19ae8fe4308db72b5b3b0a5581bf885b44a093baf3e5",
+        "filename": "libexpat1_2.6.1-2ubuntu0.4_amd64.deb"
+      },
+      {
+        "name": "libsqlite3-0",
+        "version": "3.45.1-1ubuntu2.7",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/s/sqlite3/libsqlite3-0_3.45.1-1ubuntu2.7_amd64.deb",
+        "sha256": "488511119cad001a00f7e00e597112cf743ccfbd3f7a03c82d66237e1bfd82c8",
+        "filename": "libsqlite3-0_3.45.1-1ubuntu2.7_amd64.deb"
+      },
+      {
+        "name": "libxml2",
+        "version": "2.9.14+dfsg-1.3ubuntu3.8",
+        "url": "https://packages.termux.dev/apt/termux-main/pool/main/libx/libxml2/libxml2_2.15.4_x86_64.deb",
+        "sha256": "694be31ee936772409b16b3bbcf5b27afb0623975eadd025b3f1ec2053d9fa95",
+        "filename": "pool/main/libx/libxml2/libxml2_2.15.4_x86_64.deb"
+      },
+      {
+        "name": "libtinfo6",
+        "version": "6.4+20240113-1ubuntu2.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2.2_amd64.deb",
+        "sha256": "b67a6df2bdab61d273eabebd208bb6a3fb12618a390a067e1ee305a409ff03d9",
+        "filename": "libtinfo6_6.4+20240113-1ubuntu2.2_amd64.deb"
+      },
+      {
+        "name": "libncursesw6",
+        "version": "6.4+20240113-1ubuntu2.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/libncursesw6_6.4+20240113-1ubuntu2.2_amd64.deb",
+        "sha256": "579c9488755d1ddd70f66480cafd2f68776f68314d15d9cf4b5449d0de0fc968",
+        "filename": "libncursesw6_6.4+20240113-1ubuntu2.2_amd64.deb"
+      },
+      {
+        "name": "libreadline8t64",
+        "version": "8.2-4build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/r/readline/libreadline8t64_8.2-4build1_amd64.deb",
+        "sha256": "563977a16df03b611f5239cc1e9a0426e86479fcc616b5c9e200ea32063119e5",
+        "filename": "libreadline8t64_8.2-4build1_amd64.deb"
+      },
+      {
+        "name": "libedit2",
+        "version": "3.1-20230828-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libe/libedit/libedit2_3.1-20230828-1build1_amd64.deb",
+        "sha256": "3afbc8ddf835049dd4d88275b9d13680e4c4cdd59e191cbd63424152cc08e00e",
+        "filename": "libedit2_3.1-20230828-1build1_amd64.deb"
+      },
+      {
+        "name": "libgmp10",
+        "version": "2:6.3.0+dfsg-2ubuntu6.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6.1_amd64.deb",
+        "sha256": "285f8a505dfa8e1b33f357a9d8d3477ad35bf18c0b34771a6df4c25923f3ae0d",
+        "filename": "libgmp10_2:6.3.0+dfsg-2ubuntu6.1_amd64.deb"
+      },
+      {
+        "name": "libmpfr6",
+        "version": "4.2.1-1build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/m/mpfr4/libmpfr6_4.2.1-1build1.1_amd64.deb",
+        "sha256": "aebc1c8b69a1f98bb43dfc268daecd181116dbf40b13ee4e822eb4bdd52b493a",
+        "filename": "libmpfr6_4.2.1-1build1.1_amd64.deb"
+      },
+      {
+        "name": "libmpc3",
+        "version": "1.3.1-1build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/m/mpclib3/libmpc3_1.3.1-1build1.1_amd64.deb",
+        "sha256": "cebe6098bb3d66fdacac9dc6fe406a651216d9c00f27c3f9c159d15d96cdf864",
+        "filename": "libmpc3_1.3.1-1build1.1_amd64.deb"
+      },
+      {
+        "name": "libatomic1",
+        "version": "14.2.0-4ubuntu2~24.04.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gcc-14/libatomic1_14.2.0-4ubuntu2~24.04.1_amd64.deb",
+        "sha256": "fe49cbbc7be753528380c724a8eef5f1e31dffa9221f692c5069048d81c7449d",
+        "filename": "libatomic1_14.2.0-4ubuntu2~24.04.1_amd64.deb"
+      },
+      {
+        "name": "libuuid1",
+        "version": "2.39.3-9ubuntu6.5",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/u/util-linux/libuuid1_2.39.3-9ubuntu6_amd64.deb",
+        "sha256": "4ba2c3a10469d1ab8e01a9af8e39093ed43addada658c04737287c5f91a1645b",
+        "filename": "libuuid1_2.39.3-9ubuntu6_amd64.deb"
+      },
+      {
+        "name": "libpng16-16t64",
+        "version": "1.6.43-5ubuntu0.6",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libp/libpng1.6/libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb",
+        "sha256": "ac0163f58b8aa52dfdd17cdc10a83f3db084cb91a62686023f5c983d6ff89f8b",
+        "filename": "libpng16-16t64_1.6.43-5ubuntu0.6_amd64.deb"
+      },
+      {
+        "name": "libwebp7",
+        "version": "1.3.2-0.4build3",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libw/libwebp/libwebp7_1.3.2-0.4build3_amd64.deb",
+        "sha256": "c86f6439f0bbc531f7199794654231f3b29327d6585958511b958795d51c2484",
+        "filename": "libwebp7_1.3.2-0.4build3_amd64.deb"
+      },
+      {
+        "name": "libtiff6",
+        "version": "4.5.1+git230720-4ubuntu2.5",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/t/tiff/libtiff6_4.5.1+git230720-4ubuntu2.5_amd64.deb",
+        "sha256": "564cdf59dda5e1a826c51b5868ee2785fffa26ee5a7bad95bc5e8c8224c931b8",
+        "filename": "libtiff6_4.5.1+git230720-4ubuntu2.5_amd64.deb"
+      },
+      {
+        "name": "libfreetype6",
+        "version": "2.13.2+dfsg-1ubuntu0.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/f/freetype/libfreetype6_2.13.2+dfsg-1ubuntu0.1_amd64.deb",
+        "sha256": "f6937fd8a77e83001dcfd3857d5a5cfbd4caaeb297c7fdb71ec50514843e48af",
+        "filename": "libfreetype6_2.13.2+dfsg-1ubuntu0.1_amd64.deb"
+      },
+      {
+        "name": "libfontconfig1",
+        "version": "2.15.0-1.1ubuntu2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/f/fontconfig/libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb",
+        "sha256": "a2bc05cfef021fdb84285036f98eda5ebec3c4b7a378f5aa2bdba5c4d3d8d586",
+        "filename": "libfontconfig1_2.15.0-1.1ubuntu2_amd64.deb"
+      },
+      {
+        "name": "libglib2.0-0t64",
+        "version": "2.80.0-6ubuntu3.8",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/glib2.0/libglib2.0-0t64_2.80.0-6ubuntu3.8_amd64.deb",
+        "sha256": "ca4eda0e01c76ba2e5e501e77decce53d98a641234b517eb98fc5d74980f913f",
+        "filename": "libglib2.0-0t64_2.80.0-6ubuntu3.8_amd64.deb"
+      },
+      {
+        "name": "libbrotli1",
+        "version": "1.1.0-2build2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/b/brotli/libbrotli1_1.1.0-2build2_amd64.deb",
+        "sha256": "74492419b8fda803774b8c9acef6afc5d2f9ff31782635aae212906adae7b277",
+        "filename": "libbrotli1_1.1.0-2build2_amd64.deb"
+      },
+      {
+        "name": "libidn2-0",
+        "version": "2.3.7-2build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libi/libidn2/libidn2-0_2.3.7-2build1.1_amd64.deb",
+        "sha256": "46bfd10df095a23b65f58115de47a547c9a2d14627749bd0423ae78c14be77d3",
+        "filename": "libidn2-0_2.3.7-2build1.1_amd64.deb"
+      },
+      {
+        "name": "libunistring5",
+        "version": "1.1-2build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libu/libunistring/libunistring5_1.1-2build1.1_amd64.deb",
+        "sha256": "203d7657b5f54633fba1a9c9b784d556ef83c9f6787b3185ba55a88e07b865a3",
+        "filename": "libunistring5_1.1-2build1.1_amd64.deb"
+      },
+      {
+        "name": "libpsl5t64",
+        "version": "0.21.2-1.1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libp/libpsl/libpsl5t64_0.21.2-1.1build1_amd64.deb",
+        "sha256": "a6c85d1303ae90b6a3209d73c4f047f82c27cdc963c48adfd95dd7abca64f039",
+        "filename": "libpsl5t64_0.21.2-1.1build1_amd64.deb"
+      },
+      {
+        "name": "libtasn1-6",
+        "version": "4.19.0-3ubuntu0.24.04.2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libt/libtasn1-6/libtasn1-6_4.19.0-3ubuntu0.24.04.2_amd64.deb",
+        "sha256": "f82c9ad142f952ea523bda5bfca7bb0802af3a50b8c0f0dd9ec18cdfa104bde7",
+        "filename": "libtasn1-6_4.19.0-3ubuntu0.24.04.2_amd64.deb"
+      },
+      {
+        "name": "libnettle8t64",
+        "version": "3.9.1-2.2build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/nettle/libnettle8t64_3.9.1-2.2build1.1_amd64.deb",
+        "sha256": "6d97fbc1972633083f08f51ccab433606c97bbceb897c631c66495117ca3406f",
+        "filename": "libnettle8t64_3.9.1-2.2build1.1_amd64.deb"
+      },
+      {
+        "name": "libhogweed6t64",
+        "version": "3.9.1-2.2build1.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/n/nettle/libhogweed6t64_3.9.1-2.2build1.1_amd64.deb",
+        "sha256": "a9b5f7e9d49ba9060e1c933567046fbc6feab6096799cbf550b7214dc9b0f49b",
+        "filename": "libhogweed6t64_3.9.1-2.2build1.1_amd64.deb"
+      },
+      {
+        "name": "libp11-kit0",
+        "version": "0.25.3-4ubuntu2.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/p/p11-kit/libp11-kit0_0.25.3-4ubuntu2.2_amd64.deb",
+        "sha256": "e7c58aeac19d89f5f1492dfaa52b8623bcd56edc40983f5243ad56d94f477bf2",
+        "filename": "libp11-kit0_0.25.3-4ubuntu2.2_amd64.deb"
+      },
+      {
+        "name": "libgnutls30t64",
+        "version": "3.8.3-1.1ubuntu3.6",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/g/gnutls28/libgnutls30t64_3.8.3-1.1ubuntu3.6_amd64.deb",
+        "sha256": "b8944756260c5ea6b7fac019745f931f905aa7a4df0763676b1b25c911b692e2",
+        "filename": "libgnutls30t64_3.8.3-1.1ubuntu3.6_amd64.deb"
+      },
+      {
+        "name": "libcap2",
+        "version": "1:2.66-5ubuntu2.4",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libc/libcap2/libcap2_2.66-5ubuntu2.4_amd64.deb",
+        "sha256": "23c627c77c66552a658e62852f244f4946dc543898e0ec5428d5dc6bffde2d6a",
+        "filename": "libcap2_1:2.66-5ubuntu2.4_amd64.deb"
+      },
+      {
+        "name": "libx11-6",
+        "version": "2:1.8.7-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libx11/libx11-6_1.8.7-1build1_amd64.deb",
+        "sha256": "397f84347476a3c5786b39f3ff6f0f82866eb3d8be6d2ad3efeadf019efe5b80",
+        "filename": "libx11-6_2:1.8.7-1build1_amd64.deb"
+      },
+      {
+        "name": "libxext6",
+        "version": "2:1.3.4-1build2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxext/libxext6_1.3.4-1build2_amd64.deb",
+        "sha256": "45783969a9ece9d7b7b733b8c60981584c53c6bc5ee3b42d295d2f80d1285679",
+        "filename": "libxext6_2:1.3.4-1build2_amd64.deb"
+      },
+      {
+        "name": "libxrender1",
+        "version": "1:0.9.10-1.1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxrender/libxrender1_0.9.10-1.1build1_amd64.deb",
+        "sha256": "d70bd831aebe8d4834b5dd2ed98df26dd6bd27f1042c47543bd7f66df1ae22ea",
+        "filename": "libxrender1_1:0.9.10-1.1build1_amd64.deb"
+      },
+      {
+        "name": "libxrandr2",
+        "version": "2:1.5.2-2build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxrandr/libxrandr2_1.5.2-2build1_amd64.deb",
+        "sha256": "f2955a5e594f5724b58ad241d9231ea191cb36574a0d5e5ca6b661cd41d6256d",
+        "filename": "libxrandr2_2:1.5.2-2build1_amd64.deb"
+      },
+      {
+        "name": "libxi6",
+        "version": "2:1.8.1-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxi/libxi6_1.8.1-1build1_amd64.deb",
+        "sha256": "0ea7acb5e8a8ce4d6653b30e03a319bfe136db7bfb5ee7cad34c2aa1272ea8d9",
+        "filename": "libxi6_2:1.8.1-1build1_amd64.deb"
+      },
+      {
+        "name": "libxfixes3",
+        "version": "1:6.0.0-2build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxfixes/libxfixes3_6.0.0-2build1_amd64.deb",
+        "sha256": "0ee1015cccd063249e01c0cd0bf45f513c8ac9a1e5e485070c12e69192455e4a",
+        "filename": "libxfixes3_1:6.0.0-2build1_amd64.deb"
+      },
+      {
+        "name": "libxinerama1",
+        "version": "2:1.1.4-3build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxinerama/libxinerama1_1.1.4-3build1_amd64.deb",
+        "sha256": "c8c93a3efdbb06e314f41bf48af4ca3652e4a3826bab5b9e00887660e619f239",
+        "filename": "libxinerama1_2:1.1.4-3build1_amd64.deb"
+      },
+      {
+        "name": "libxcursor1",
+        "version": "1:1.2.1-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxcursor/libxcursor1_1.2.1-1build1_amd64.deb",
+        "sha256": "1a4beee621454e42fe0d2f4e1633611126e43d891f0aec28e4a06744f6e9f04d",
+        "filename": "libxcursor1_1:1.2.1-1build1_amd64.deb"
+      },
+      {
+        "name": "libxkbcommon0",
+        "version": "1.6.0-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libx/libxkbcommon/libxkbcommon0_1.6.0-1build1_amd64.deb",
+        "sha256": "2b9caeb423efb540296a1cb20b872cc630c23908407ecb5c1c787a617622d664",
+        "filename": "libxkbcommon0_1.6.0-1build1_amd64.deb"
+      },
+      {
+        "name": "libwayland-client0",
+        "version": "1.22.0-2.1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/w/wayland/libwayland-client0_1.22.0-2.1build1_amd64.deb",
+        "sha256": "6af0aed41d75149bea22fa468f01eb058ffe3e35ef07ff2f13fb88a90387881d",
+        "filename": "libwayland-client0_1.22.0-2.1build1_amd64.deb"
+      },
+      {
+        "name": "libicu74",
+        "version": "74.2-1ubuntu3.1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/i/icu/libicu74_74.2-1ubuntu3.1_amd64.deb",
+        "sha256": "c9a70989678660eed9a1e904c74fa043da8bec8e2036856fc16e31ced79b04f8",
+        "filename": "libicu74_74.2-1ubuntu3.1_amd64.deb"
+      },
+      {
+        "name": "libdouble-conversion3",
+        "version": "3.3.0-1build1",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/universe/d/double-conversion/libdouble-conversion3_3.3.0-1build1_amd64.deb",
+        "sha256": "856f534738da20fa9d8c271e17781fba3dc180bbbab116c22a0b569f6f506e25",
+        "filename": "libdouble-conversion3_3.3.0-1build1_amd64.deb"
+      },
+      {
+        "name": "libharfbuzz0b",
+        "version": "8.3.0-2build2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/h/harfbuzz/libharfbuzz0b_8.3.0-2build2_amd64.deb",
+        "sha256": "d6f7eea2244f98aa0463a056680d4629476bf624767ede301560e24add686b5c",
+        "filename": "libharfbuzz0b_8.3.0-2build2_amd64.deb"
+      },
+      {
+        "name": "libjpeg-turbo8",
+        "version": "2.1.5-2ubuntu2",
+        "url": "https://archive.ubuntu.com/ubuntu/pool/main/libj/libjpeg-turbo/libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb",
+        "sha256": "f68b5b23bc8a1688fb787d2aed7e2cdf895a73022f6a5025e183162dac4500b2",
+        "filename": "libjpeg-turbo8_2.1.5-2ubuntu2_amd64.deb"
+      }
+    ],
+    "archive": {
+      "filename": "box64-libs.tar.gz",
+      "sha256": "f38f892f89f931236937b192d3b54babdd3e4f6816162f16d792dd0eb981ccbe"
+    }
+  },
+  "box64-layer": {
+    "description": "Transparent Box64 execution layer: termdeb-wrap64 (installed in the guest at /usr/local/bin) replaces every x86_64 ELF executable with the ARM64 termdeb-x86_64-launcher (original moves to <dir>/.termdeb-x86_64/), so x86_64 binaries run through box64 for every exec path (execve, execvp, posix_spawn, JDK jspawnhelper) with no LD_PRELOAD, and native ARM64 binaries are never touched. Replaces the legacy libbox64auto.so LD_PRELOAD interposer, which JDK 17's ProcessBuilder (jspawnhelper -> execvp) bypassed.",
+    "version": "2.0.0",
+    "architecture": "aarch64",
+    "install_method": "prebuilt_binary",
+    "required_for_offline": true,
+    "license": "MIT",
+    "source": "local (termdeb-assets/prebuilt/box64/termdeb-x86_64-launcher.c)",
+    "notes": "Committed as a prebuilt binary because the asset pipeline has no NDK access. Rebuild: aarch64-linux-android24-clang -O2 -static -s -o termdeb-x86_64-launcher termdeb-x86_64-launcher.c",
+    "destination": "box64/termdeb-x86_64-launcher"
+  },
+  "box64-wrapd": {
+    "description": "Continuous Box64 wrap watcher daemon: runs on the host at session start (backgrounded by termdeb-ubuntu), watches the Gradle transform cache, .android and the guest /usr dirs with inotify and wraps any x86_64 ELF executable the instant it is written or moved in - covering AGP re-extracting aapt2/aidl/zipalign into fresh ~/.gradle/caches/<ver>/transforms dirs mid-build - plus a periodic full sweep. Single-instance via flock.",
+    "version": "1.0.0",
+    "architecture": "aarch64",
+    "install_method": "prebuilt_binary",
+    "required_for_offline": true,
+    "license": "MIT",
+    "source": "local (termdeb-assets/prebuilt/box64/termdeb-wrapd.c)",
+    "notes": "Committed as a prebuilt binary because the asset pipeline has no NDK access. Rebuild: aarch64-linux-android24-clang -O2 -static -s -o termdeb-wrapd termdeb-wrapd.c",
+    "destination": "box64/termdeb-wrapd"
+  },
+  "termdeb-config": {
+    "description": "TermDeb default configuration files",
+    "version": "0.1.0",
+    "url": null,
+    "sha256": null,
+    "filename": null,
+    "architecture": "all",
+    "compression": null,
+    "required_for_offline": true,
+    "license": "MIT",
+    "license_url": null,
+    "source": "local",
+    "destination": "config/",
+    "extract_to": "config/"
+  }
+}

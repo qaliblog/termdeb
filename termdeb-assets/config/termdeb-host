@@ -1,0 +1,50 @@
+#!/bin/bash
+# termdeb-host - Exit Debian and return to native TermDeb shell
+#
+# When called from inside the Debian proot environment, this command
+# exits the proot session and drops the user back into the native
+# TermDeb shell environment.
+#
+# It cannot exec a host binary from inside the guest (proot ptrace-wraps
+# the whole process tree and the host paths do not exist inside the fake
+# root), so it writes a marker file into the bound home
+# (/root inside the guest == $HOME on the host) and exits. The login
+# shell wrapper (termdeb-shell-wrapper) then picks up the marker and
+# drops the user into the native TermDeb shell.
+#
+# Usage:
+#   termdeb-host         - Exit to native TermDeb shell
+#   termdeb-host help    - Show help information
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+if [ "${1:-}" = "help" ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "termdeb-host - Exit Debian to native TermDeb shell"
+    echo ""
+    echo "Usage:"
+    echo "  termdeb-host         Exit Debian and return to TermDeb shell"
+    echo "  termdeb-host help    Show this help message"
+    echo ""
+    echo "From the native TermDeb shell, you can re-enter Debian with:"
+    echo "  termdeb-debian"
+    echo ""
+    exit 0
+fi
+
+# Paths
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+
+# Inside the Debian proot guest: uid is 0 and /etc/os-release is the guest's.
+# Write the marker into the bound home (/root == host $HOME) and exit.
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ]; then
+    echo "Exiting Debian..."
+    if touch /root/.termdeb-host 2>/dev/null; then
+        exit 0
+    fi
+fi
+
+# Not inside proot (or marker failed): just start a regular TermDeb shell.
+exec "${TERMDEB_PREFIX}/bin/bash" --login

@@ -1,0 +1,181 @@
+#!/bin/bash
+# termdeb-wrap64 - TermDeb transparent Box64 execution layer
+#
+# Scans directories for x86_64 (Intel/AMD) ELF *executables* and replaces
+# each with an ARM64 launcher that routes execution through box64
+# automatically:
+#
+#   aapt2  ->  (launcher, ARM64)   +   .termdeb-x86_64/aapt2  (real x86_64)
+#
+# Because the file on disk is now an ARM64 binary, EVERY exec mechanism works
+# - execve, execvp, posix_spawn, JDK 17's jspawnhelper, direct kernel exec -
+# no LD_PRELOAD, no interposer, no binfmt_misc required. Native ARM64
+# binaries, scripts and shared libraries (.so) are never touched. New x86_64
+# tools (e.g. an Android SDK aapt2, including the copy the Android Gradle
+# Plugin downloads into ~/.gradle/caches) just work, including as
+# subprocesses of native ARM64 parents like Gradle's JVM.
+#
+# The Android SDK is discovered dynamically, so it works regardless of what
+# the folder is called or where it lives: $ANDROID_HOME/$ANDROID_SDK_ROOT,
+# ANY directory under $HOME containing a build-tools/ folder, any
+# local.properties sdk.dir found under $HOME (guest /root paths are
+# translated), and common locations on /sdcard (host /storage/emulated/0).
+# `termdeb-wrap64 --print-sdk-roots` prints the discovered roots one per
+# line so the caller can hand them to termdeb-wrapd for real-time watching.
+#
+# The heavy lifting is done by the compiled termdeb-scan64 (raw syscalls, no
+# per-file process spawning), so scans stay fast even inside proot. Its
+# freshness state lives in a sidecar file in the app's own data dir - the
+# layer never writes anything into user/project directories (an earlier
+# stamp-file design broke `aapt2 link`, which consumes whole directories).
+#
+# Usage: termdeb-wrap64 [dir...]
+#   With no arguments, scans the PATH directories plus /usr/local, /opt,
+#   $HOME (recursively), the Gradle/Android caches and the discovered SDK
+#   roots. Explicit dir arguments replace the defaults.
+#   termdeb-wrap64 --print-sdk-roots   Prints discovered SDK roots (1/line).
+#
+# Copyright (c) TermDeb Contributors - MIT License
+
+# ---- Context: inside the Debian guest or on the host? ----
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ]; then
+    # Inside the Debian guest.
+    LAUNCHER=/usr/local/libexec/termdeb-x86_64-launcher
+    SCANNER=/usr/local/libexec/termdeb-scan64
+    STATE=/var/lib/termdeb/scan-state
+    HOME_D="${HOME:-/root}"
+    SDCARD_ROOT=/sdcard
+    DEFAULT_ROOTS=()
+    IFS=: read -r -a DEFAULT_ROOTS <<< "$PATH"
+    DEFAULT_ROOTS+=("/usr/local" "/opt")
+    DEFAULT_ROOTS+=("$HOME_D")
+else
+    # On the host: operate directly on the app data dir (no proot needed).
+    TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+    TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+    TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+    TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+    LAUNCHER="${TERMDEB_UROOT}/usr/local/libexec/termdeb-x86_64-launcher"
+    SCANNER="${TERMDEB_UROOT}/usr/local/libexec/termdeb-scan64"
+    STATE="${TERMDEB_APP_DIR}/files/termdeb-scan-state"
+    HOME_D="${TERMDEB_HOME}"
+    SDCARD_ROOT=/storage/emulated/0
+    DEFAULT_ROOTS=("${TERMDEB_UROOT}/usr/local" "${TERMDEB_UROOT}/usr/bin"
+                   "${TERMDEB_UROOT}/usr/sbin" "${TERMDEB_UROOT}/opt" "${TERMDEB_HOME}")
+fi
+
+# Hidden binary caches that hold x86_64 toolchain binaries: the Android Gradle
+# Plugin downloads its own aapt2/aidl/zipalign into
+# ~/.gradle/caches/<version>/transforms and spawns them as subprocesses of the
+# (native ARM64) JVM - they must be wrapped too. The general recursion skips
+# hidden dirs for speed, so list them explicitly.
+if [ -n "${HOME_D:-}" ]; then
+    for t in "$HOME_D"/.gradle/caches/*/transforms; do
+        [ -d "$t" ] && DEFAULT_ROOTS+=("$t")
+    done
+    [ -d "$HOME_D/.android" ] && DEFAULT_ROOTS+=("$HOME_D/.android")
+fi
+
+# ---- SDK root discovery (name- and location-independent) ----
+SDK_ROOTS=()
+
+sdk_root_contains() {
+    local r
+    for r in "${SDK_ROOTS[@]}"; do [ "$r" = "$1" ] && return 0; done
+    return 1
+}
+
+sdk_add_dir() {
+    [ -n "$1" ] && [ -d "$1" ] || return
+    sdk_root_contains "$1" || SDK_ROOTS+=("$1")
+}
+
+# Read sdk.dir from a local.properties, translating guest /root -> $HOME_D.
+sdk_add_local_properties() {
+    local lp sd
+    [ -f "$1" ] || return
+    sd=$(sed -n 's/^sdk\.dir[[:space:]]*=[[:space:]]*//p' "$1" 2>/dev/null | head -1)
+    [ -n "$sd" ] || return
+    case "$sd" in
+        /root/*) sd="${HOME_D}${sd#/root}" ;;
+    esac
+    sdk_add_dir "$sd"
+}
+
+discover_sdk_roots() {
+    # 1. Explicit environment.
+    sdk_add_dir "$ANDROID_HOME"
+    sdk_add_dir "$ANDROID_SDK_ROOT"
+    # 2. ANY directory under $HOME containing build-tools (whatever it is
+    #    called): the parent of each build-tools dir is an SDK root.
+    local bt
+    while IFS= read -r bt; do
+        [ -n "$bt" ] || continue
+        sdk_add_dir "$(dirname "$bt")"
+    done < <(find "$HOME_D" -maxdepth 5 -type d -name build-tools 2>/dev/null)
+    # 3. local.properties sdk.dir references under $HOME (projects the user
+    #    cloned/placed there).
+    local lp
+    while IFS= read -r lp; do
+        sdk_add_local_properties "$lp"
+    done < <(find "$HOME_D" -maxdepth 3 -name local.properties -type f 2>/dev/null)
+    # 4. /sdcard (host: /storage/emulated/0): common locations + shallow
+    #    local.properties scan (a full sdcard walk every session is too
+    #    costly, so only look in likely places and project markers).
+    if [ -d "$SDCARD_ROOT" ] && [ -r "$SDCARD_ROOT" ]; then
+        local p
+        for p in android-sdk Android/Sdk sdk tools termdeb-sdk Termux Android/Sdk/platform-tools; do
+            sdk_add_dir "$SDCARD_ROOT/$p"
+        done
+        while IFS= read -r lp; do
+            sdk_add_local_properties "$lp"
+        done < <(find "$SDCARD_ROOT" -maxdepth 2 -name local.properties -type f 2>/dev/null)
+    fi
+}
+
+# Append discovered SDK roots to the default scan set (dedup).
+sdk_append_to_defaults() {
+    local r
+    for r in "${SDK_ROOTS[@]}"; do
+        sdk_root_contains "$r" && continue
+        DEFAULT_ROOTS+=("$r")
+    done
+}
+
+main() {
+    if [ ! -x "$LAUNCHER" ]; then
+        echo "termdeb-wrap64: launcher missing at $LAUNCHER - reinstall TermDeb" >&2
+        return 1
+    fi
+    if [ ! -x "$SCANNER" ]; then
+        echo "termdeb-wrap64: scanner missing at $SCANNER - reinstall TermDeb" >&2
+        return 1
+    fi
+    discover_sdk_roots
+    if [ "$1" = "--print-sdk-roots" ]; then
+        local r
+        for r in "${SDK_ROOTS[@]}"; do echo "$r"; done
+        return 0
+    fi
+    sdk_append_to_defaults
+    local roots=()
+    if [ "$#" -gt 0 ]; then
+        roots=("$@")
+    else
+        roots=("${DEFAULT_ROOTS[@]}")
+    fi
+    local existing=()
+    local r
+    for r in "${roots[@]}"; do
+        [ -n "$r" ] || continue
+        [ -d "$r" ] || continue
+        existing+=("$r")
+    done
+    if [ "${#existing[@]}" -gt 0 ]; then
+        mkdir -p "$(dirname "$STATE")" 2>/dev/null || true
+        "$SCANNER" "$LAUNCHER" "$STATE" "${existing[@]}"
+    fi
+    return 0
+}
+
+main "$@"

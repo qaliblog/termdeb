@@ -1,0 +1,107 @@
+#!/bin/bash
+# termdeb-provision - Provision the Debian userspace (systemd, dbus, ...)
+#
+# Context-aware: when run inside the Debian guest it runs apt to install
+# systemd, dbus, ca-certificates and locales (a complete userspace); when run
+# on the host it launches the guest copy through proot. Idempotent and
+# resumable: the marker /etc/termdeb-provisioned is written only on success, so
+# an interrupted or offline provisioning retries on the next session start.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+# ---- Inside the Debian guest? ----
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ] && [ -x /usr/bin/apt-get ]; then
+  [ -f /etc/termdeb-provisioned ] && { echo "TermDeb: Debian userspace already provisioned."; exit 0; }
+
+  # Check if packages are already present (pre-provisioned rootfs bundled in APK).
+  # When the rootfs ships with systemd/dbus/ca-certificates/locales pre-installed,
+  # skip the slow apt-get network calls and write the marker directly.
+  if [ -x /usr/lib/systemd/systemd ] && [ -x /usr/bin/dbus-daemon ]; then
+    # Generate locale if missing (fast, no network needed). locale-gen uses
+    # /etc/locale.gen, so enable the locale explicitly before regenerating.
+    if ! locale -a 2>/dev/null | grep -qE 'en_US.UTF-8|en_US.utf8' && command -v locale-gen >/dev/null 2>&1; then
+      if [ -f /etc/locale.gen ] && ! grep -qE '^en_US.UTF-8[[:space:]]+UTF-8' /etc/locale.gen; then
+        printf 'en_US.UTF-8 UTF-8\n' >> /etc/locale.gen
+      fi
+      timeout 120 locale-gen >/dev/null 2>&1 || true
+    fi
+    touch /etc/termdeb-provisioned
+    echo "TermDeb: Debian userspace already provisioned (packages bundled in rootfs)."
+    exit 0
+  fi
+
+  # Packages not present - fall back to apt-get (online provisioning).
+  # Keep a single Debian trixie source definition: Debian ships deb822
+  # debian.sources, so an additional legacy sources.list only creates duplicate
+  # target warnings. Preserve it as an inactive diagnostic copy.
+  if [ -s /etc/apt/sources.list.d/debian.sources ] && [ -f /etc/apt/sources.list ]; then
+    mv /etc/apt/sources.list /etc/apt/sources.list.termdeb-disabled
+  fi
+  mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial /usr/share/man/man1
+  export DEBIAN_FRONTEND=noninteractive
+  export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  echo "TermDeb: running apt-get update..."
+  timeout 180 apt-get update -qq 2>&1 | tail -2
+  rc=${PIPESTATUS[0]:-$?}
+  if [ "$rc" != "0" ]; then
+    echo "TermDeb: apt-get update failed (offline?). Provisioning will retry on the next start."
+    exit 1
+  fi
+  echo "TermDeb: installing systemd, dbus, ca-certificates, locales..."
+  timeout 600 apt-get install -y --no-install-recommends systemd dbus ca-certificates locales 2>&1 | tail -3
+  rc=${PIPESTATUS[0]:-$?}
+  # dpkg maintainer scripts (systemd postinst) may warn under proot; what matters
+  # is that the systemd binary landed in the guest.
+  if [ "$rc" != "0" ] && [ ! -x /usr/lib/systemd/systemd ]; then
+    echo "TermDeb: package installation failed; provisioning will retry on the next start."
+    exit 1
+  fi
+  # Ensure an en_US.UTF-8 locale exists (Debian trixie ships a minimal
+  # locale-archive; regenerate only if needed). locale-gen can be very slow
+  # under proot, so it is time-boxed - a timeout here must not block the
+  # session or the marker.
+  if ! locale -a 2>/dev/null | grep -qE 'en_US.UTF-8|en_US.utf8' && command -v locale-gen >/dev/null 2>&1; then
+    if [ -f /etc/locale.gen ] && ! grep -qE '^en_US.UTF-8[[:space:]]+UTF-8' /etc/locale.gen; then
+      printf 'en_US.UTF-8 UTF-8\n' >> /etc/locale.gen
+    fi
+    timeout 120 locale-gen >/dev/null 2>&1 || true
+  fi
+  touch /etc/termdeb-provisioned
+  echo "TermDeb: Debian userspace provisioned - systemd is now installed in the guest."
+  # The transparent Box64 layer is refreshed on the HOST by termdeb-debian at
+  # every session start (no proot overhead), so nothing to do here.
+  exit 0
+fi
+
+# ---- Host context: launch the guest copy through proot ----
+# NOTE: paths derive from $PREFIX instead of ${ANDROID_DATA:-...}: Android
+# always sets ANDROID_DATA=/data, so the fallback would never trigger and
+# paths would resolve under /data instead of the app's data directory.
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+PROOT="${TERMDEB_PREFIX}/bin/proot"
+BOX64="${TERMDEB_PREFIX}/bin/box64"
+
+[ -d "${TERMDEB_UROOT}" ] || { echo "TermDeb: Debian rootfs missing."; exit 1; }
+[ -x "${PROOT}" ] || { echo "TermDeb: proot missing."; exit 1; }
+
+mkdir -p "${TERMDEB_HOME}/storage" "${TERMDEB_PREFIX}/tmp" "${TERMDEB_PREFIX}/tmp/shm"
+export PROOT_TMP_DIR="${TERMDEB_PREFIX}/tmp"
+"${PROOT}" \
+  --link2symlink --kill-on-exit --root-id --cwd=/root \
+  -b /dev -b /proc -b /sys \
+  -b "${TERMDEB_HOME}:/root" \
+  -b "${TERMDEB_HOME}/storage:/mnt/storage" \
+  -b "/storage/emulated/0:/sdcard" \
+  -b "${TERMDEB_PREFIX}/tmp:/tmp" \
+  -b "${TERMDEB_PREFIX}/tmp/shm:/dev/shm" \
+  -b "${BOX64}:/usr/local/bin/box64" \
+  -b "${TERMDEB_PREFIX}/etc/resolv.conf:/etc/resolv.conf" \
+  -r "${TERMDEB_UROOT}" \
+  /usr/bin/env -i HOME=/root USER=root TERM="${TERM:-xterm-256color}" \
+  LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  /usr/local/bin/termdeb-provision
+exit $?

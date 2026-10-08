@@ -1,0 +1,75 @@
+#!/bin/bash
+# termdeb-storage - Grant Android storage access to TermDeb
+#
+# Asks the TermDeb app to show the Android storage permission dialog
+# (WRITE_EXTERNAL_STORAGE / MANAGE_EXTERNAL_STORAGE). When granted, the app
+# creates symlinks to Android shared storage at ~/storage
+# (shared, downloads, dcim, pictures, music, movies, ...) automatically.
+#
+# Inside Debian, shared storage is mounted at /sdcard. Run this from the
+# native TermDeb host shell; when run from inside Debian it exits the proot
+# session, requests the permission, and returns you to the host shell
+# (re-enter Debian with 'termdeb-debian').
+#
+# Usage:
+#   termdeb-storage         - Ask TermDeb for the storage permission
+#   termdeb-storage help    - Show help information
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+if [ "${1:-}" = "help" ] || [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "termdeb-storage - Grant Android storage access to TermDeb"
+    echo ""
+    echo "Usage:"
+    echo "  termdeb-storage    Ask TermDeb for the storage permission"
+    echo ""
+    echo "Grant the permission dialog to access Android shared storage."
+    echo "Symlinks are then created at ~/storage (shared, downloads, dcim, ...)."
+    echo "Inside Debian, shared storage is mounted at /sdcard."
+    exit 0
+fi
+
+# Paths
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+
+# When run from inside Debian, delegate to the host shell: write the marker
+# that termdeb-shell-wrapper picks up when the proot session exits, then leave.
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ]; then
+    if touch /root/.termdeb-storage 2>/dev/null; then
+        echo "Requesting the storage permission from the TermDeb host shell..."
+        echo "Leaving Debian to show the permission dialog; return with 'termdeb-debian'."
+        exit 0
+    fi
+fi
+
+echo "Requesting Android storage permission..."
+ACTION="com.qali.termdeb.app.request_storage_permissions"
+
+status=1
+# Preferred: go through the app's own am socket server (termux-am).
+if [ -x "${TERMDEB_PREFIX}/bin/termux-am" ] && [ "${TERMUX_APP__AM_SOCKET_SERVER_ENABLED:-false}" = "true" ]; then
+    if "${TERMDEB_PREFIX}/bin/termux-am" broadcast --action "$ACTION" >/dev/null 2>&1; then
+        status=0
+    fi
+fi
+
+# Fallback: system am binary. --user 0 is required when called from an app uid.
+if [ "$status" != 0 ] && [ -x /system/bin/am ]; then
+    if /system/bin/am broadcast --user 0 -a "$ACTION" >/dev/null 2>&1; then
+        status=0
+    fi
+fi
+
+if [ "$status" != 0 ]; then
+    echo "Failed to ask the TermDeb app for the storage permission."
+    echo "Make sure the TermDeb terminal is open and visible, then try again."
+    exit 1
+fi
+
+echo "A permission dialog should appear in the TermDeb app. Grant it to"
+echo "access Android shared storage. Symlinks are created automatically"
+echo "at: ${TERMDEB_HOME}/storage (shared, downloads, dcim, pictures, ...)."
+echo "Inside Debian, shared storage is mounted at /sdcard."

@@ -1,0 +1,104 @@
+#!/bin/bash
+# termdeb-native - Launch Debian as a real chroot with systemd as PID 1.
+#
+# Only possible when TermDeb has real root (su) AND the Android kernel exposes
+# the features systemd needs: mountable /proc /sys /dev, a cgroup filesystem,
+# and PID namespaces (unshare). When any piece is missing this prints a
+# diagnostic and exits non-zero so termdeb-debian falls back to proot mode.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+# NOTE: paths derive from $PREFIX instead of ${ANDROID_DATA:-...}: Android
+# always sets ANDROID_DATA=/data, so the fallback would never trigger and
+# paths would resolve under /data instead of the app's data directory.
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+
+# Real-root detection: uid 0 or a known Android root binary. Do NOT use
+# `command -v su` - the Termux bootstrap ships its own su script in $PREFIX/bin
+# (a termux-user switch, not an Android root grant).
+termdeb_has_root() {
+  [ "$(id -u)" = "0" ] && return 0
+  for p in /system/bin/su /system/xbin/su /sbin/su /vendor/bin/su /system/bin/magisk /data/adb/magisk/magisk /data/adb/ksu/bin/ksud; do
+    [ -x "$p" ] && return 0
+  done
+  return 1
+}
+
+# Re-exec as root when possible (Magisk/KernelSU su).
+if [ "$(id -u)" != "0" ]; then
+  if termdeb_has_root; then
+    for p in /system/bin/su /system/xbin/su /sbin/su /vendor/bin/su; do
+      if [ -x "$p" ]; then
+        exec "$p" -c "PREFIX='${TERMDEB_PREFIX}' HOME='${TERMDEB_HOME}' TERM='${TERM:-xterm-256color}' '$0' '$@'"
+      fi
+    done
+  fi
+  echo "termdeb-native: root access required but no Android su was found."
+  echo "termdeb-native: systemd needs real root; TermDeb will use proot mode instead."
+  exit 1
+fi
+
+# ---- Kernel feature diagnostics (each failure explains why systemd cannot run) ----
+if [ ! -d "${TERMDEB_UROOT}" ] || [ ! -f "${TERMDEB_UROOT}/etc/os-release" ]; then
+  echo "termdeb-native: Debian rootfs missing at ${TERMDEB_UROOT}"
+  exit 1
+fi
+
+if [ ! -d /sys/fs/cgroup ]; then
+  echo "termdeb-native: /sys/fs/cgroup not present - kernel cgroups unavailable."
+  exit 1
+fi
+
+if ! unshare --pid --fork true 2>/dev/null; then
+  echo "termdeb-native: PID namespace creation (unshare) not permitted by this kernel."
+  echo "termdeb-native: systemd must be PID 1 in its own namespace; it cannot run otherwise."
+  exit 1
+fi
+
+# ---- Mount the guest filesystems (idempotent, real mounts - requires root) ----
+UROOT="${TERMDEB_UROOT}"
+mount_guest() {
+  local spec="$1" target="$2"
+  [ -e "$target" ] || mkdir -p "$target"
+  mountpoint -q "$target" 2>/dev/null && return 0
+  mount $spec "$target" 2>/dev/null || { echo "termdeb-native: failed to mount $spec on $target"; return 1; }
+}
+mount_guest -t proc proc "${UROOT}/proc" || exit 1
+mount_guest -t sysfs sysfs "${UROOT}/sys" || exit 1
+mount_guest --bind /dev "${UROOT}/dev" || true
+mount_guest -t devpts devpts "${UROOT}/dev/pts" || true
+mount_guest -t tmpfs tmpfs "${UROOT}/dev/shm" || true
+mount_guest -t tmpfs tmpfs "${UROOT}/run" || true
+mount_guest --bind /storage/emulated/0 "${UROOT}/sdcard" || true
+mount_guest --bind "${TERMDEB_PREFIX}/etc/resolv.conf" "${UROOT}/etc/resolv.conf" || true
+mount_guest --bind "${BOX64}" "${UROOT}/usr/local/bin/box64" || true
+# cgroup v2 preferred, else bind the existing v1 hierarchy
+if [ -f /sys/fs/cgroup/cgroup.controllers ]; then
+  mount_guest -t cgroup2 cgroup2 "${UROOT}/sys/fs/cgroup" || true
+else
+  mount_guest --bind /sys/fs/cgroup "${UROOT}/sys/fs/cgroup" || true
+fi
+
+# ---- Launch systemd as PID 1 inside a new PID+mount namespace ----
+if [ -x "${UROOT}/usr/lib/systemd/systemd" ]; then
+  echo "TermDeb: starting systemd as PID 1 (native mode)..."
+  mkdir -p "${UROOT}/run" "${UROOT}/run/lock"
+  # --mount-proc needs util-linux unshare; toybox unshare lacks it. systemd
+  # mounts /proc itself when running as PID 1 in a container.
+  if unshare --mount --pid --fork --mount-proc true 2>/dev/null; then
+    exec unshare --mount --pid --fork --mount-proc \
+      chroot "${UROOT}" /usr/lib/systemd/systemd --system
+  else
+    exec unshare --mount --pid --fork \
+      chroot "${UROOT}" /usr/lib/systemd/systemd --system
+  fi
+fi
+
+# systemd not installed yet (provisioning pending): plain chroot shell.
+echo "TermDeb: systemd not found in the guest (run 'termdeb-debian' to provision)."
+echo "TermDeb: starting Debian in a plain chroot shell."
+exec chroot "${UROOT}" /bin/bash --login

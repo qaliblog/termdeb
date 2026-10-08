@@ -1,0 +1,28 @@
+--- a/src/elfs/elfloader.c
++++ b/src/elfs/elfloader.c
+@@ -263,13 +263,21 @@ void PreAllocateElfMemory(elfheader_t* head, int mainbin, int log_level)
+     if(!head->vaddr) {
+         sz += head->align;
+         raw = InternalMmap((void*)offs, sz, 0, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE, -1, 0);
+         image = (void*)(((uintptr_t)raw+max_align)&~max_align);
+     } else {
+-        image = raw = InternalMmap((void*)head->vaddr, sz, 0, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE, -1, 0);
++        // Fixed-address (ET_EXEC) binaries require the image at head->vaddr.
++        // Some kernels (e.g. Android) ignore non-fixed low mmap hints and
++        // relocate the image, which crashes non-relocatable binaries (e.g.
++        // large Bun-compiled apps like opencode). Try MAP_FIXED first so the
++        // image lands exactly at head->vaddr. The pre-reserve runs before the
++        // emulated stack/heap are allocated, so the low region is free; if the
++        // mapping still fails (ENOMEM etc.), fall back to a plain mmap so the
++        // stock behavior (warning + continue) applies.
++        image = raw = InternalMmap((void*)head->vaddr, sz, 0, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE|MAP_FIXED, -1, 0);
++        if(image==MAP_FAILED)
++            image = raw = InternalMmap((void*)head->vaddr, sz, 0, MAP_ANONYMOUS|MAP_PRIVATE|MAP_NORESERVE, -1, 0);
+         if(head->vaddr&(box64_pagesize-1)) {
+             // load address might be lower
+             if((uintptr_t)image == (head->vaddr&~(box64_pagesize-1))) {
+                 image = (void*)head->vaddr;
+                 sz += ((uintptr_t)image)-((uintptr_t)raw);
+             }
+         }
+     }

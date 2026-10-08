@@ -1,0 +1,355 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+      - 'github-releases/**'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package_variant: [ apt-android-7 ]
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v6
+
+      - name: Setup java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Ensure Android NDK (guest adb client + Box64 layer)
+        shell: bash {0}
+        run: |
+          # Two native pieces are built FROM SOURCE with the NDK during asset
+          # preparation, so source changes ship in the APK without a manual
+          # prebuilt refresh:
+          #   1. the guest ADB client (app/src/main/cpp/adb/adb_client.c, installed
+          #      into the Debian rootfs as /usr/bin/adb)
+          #   2. the Box64 transparent layer helpers (termdeb-x86_64-launcher /
+          #      termdeb-scan64 / termdeb-wrapd), which embed the app package,
+          #      the files/debian-root guest path and the termdeb-* tool names.
+          if ls "$ANDROID_HOME"/ndk/*/ndk-build >/dev/null 2>&1; then
+            echo "NDK already installed: $(ls -1d "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)"
+          else
+            echo "No NDK found; installing ndk;27.0.12077973"
+            yes | "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+            "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" >/tmp/sdkmanager-ndk.log 2>&1 || {
+              echo "sdkmanager NDK install failed:";
+              tail -30 /tmp/sdkmanager-ndk.log;
+              exit 1;
+            }
+            echo "Installed: $(ls -1d "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)"
+          fi
+
+      - name: Cache TermDeb assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/termdeb-assets
+            app/src/main/assets/termdeb-runtime
+          key: termdeb-assets-${{ runner.os }}-${{ hashFiles('termdeb-assets/manifest.json') }}
+          restore-keys: |
+            termdeb-assets-${{ runner.os }}-
+
+      - name: Setup QEMU for ARM64 emulation
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  QEMU ARM64 Setup (optional, for rootfs provisioning)"
+          echo "========================================="
+          echo ""
+          echo "QEMU is ONLY used during build to pre-provision the Debian ARM64"
+          echo "rootfs with systemd, dbus, ca-certificates, and locales."
+          echo ""
+          echo "The TermDeb app itself uses Box64 (not QEMU) for x86_64 emulation"
+          echo "at runtime. QEMU is purely a build-time dependency for rootfs setup."
+          echo ""
+          if ! docker run --privileged --rm --pull=always tonistiigi/binfmt --install arm64 2>/dev/null; then
+            echo "WARNING: QEMU setup failed or not available."
+            echo "Rootfs provisioning will fall back to standard (un-provisioned) mode."
+            echo "The APK will still build - users will run apt-get at first launch."
+          fi
+          echo "QEMU setup complete."
+          echo ""
+
+      - name: Prepare TermDeb assets
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  TermDeb Asset Preparation"
+          echo "========================================="
+          echo ""
+          echo "Assets:"
+          echo "  - proot-distro: downloading from GitHub"
+          echo "  - Debian 13 (trixie): downloading official Debian trixie rootfs"
+          echo "  - Debian 13 (trixie): PRE-PROVISIONING (systemd, dbus, ca-certificates, locales)"
+          echo "  - Box64: committed patched ARM64 binary; transparent layer built from source with the NDK"
+          echo ""
+
+          # Show Docker version for debugging
+          docker --version 2>/dev/null || echo "Docker not available"
+          echo ""
+
+          # Run asset preparation with fallback
+          ./gradlew prepareTermDebAssets -PprovisionRootfs=true --info || {
+            echo ""
+            echo "WARNING: prepareTermDebAssets failed, continuing with available assets..."
+          }
+
+      - name: Verify TermDeb assets
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  TermDeb Asset Verification"
+          echo "========================================="
+          echo ""
+
+          ASSETS_DIR="app/src/main/assets/termdeb-runtime"
+          ERRORS=0
+
+          # Check Bootstrap (handled by :app downloadBootstraps during assembleRelease)
+          if [ -f "$ASSETS_DIR/bootstrap/aarch64.zip" ]; then
+            echo "  Bootstrap:    PASS ($(du -h $ASSETS_DIR/bootstrap/aarch64.zip | cut -f1))"
+          else
+            echo "  Bootstrap:    SKIP (built by :app during assembleRelease)"
+          fi
+
+          # Check proot-distro
+          if [ -d "$ASSETS_DIR/proot-distro" ]; then
+            FILECOUNT=$(find $ASSETS_DIR/proot-distro -type f 2>/dev/null | wc -l)
+            if [ "$FILECOUNT" -gt 0 ]; then
+              echo "  proot-distro: PASS ($FILECOUNT files)"
+            else
+              echo "  proot-distro: FAIL (empty or unreadable)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          else
+            echo "  proot-distro: FAIL (missing)"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Check Debian rootfs (accepts .tar.gz or .tar.xz)
+          DEBIAN_FILE=$(ls $ASSETS_DIR/debian/debian-trixie-arm64.tar.* 2>/dev/null | head -1)
+          if [ -n "$DEBIAN_FILE" ]; then
+            DEBIAN_SIZE=$(du -h "$DEBIAN_FILE" 2>/dev/null | cut -f1)
+            echo "  Debian ARM64: PASS ($DEBIAN_SIZE)"
+          else
+            echo "  Debian ARM64: FAIL (missing)"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          # Check proot (OPTIONAL - not needed if using bootstrap's built-in proot)
+          # proot is included in Termux bootstrap, so this check is informational
+          if [ -f "$ASSETS_DIR/proot/bin/proot" ] && [ -f "$ASSETS_DIR/proot/lib/libandroid-shmem.so" ] && [ -f "$ASSETS_DIR/proot/lib/libtalloc.so.2" ]; then
+            echo "  proot:         PASS ($(file $ASSETS_DIR/proot/bin/proot 2>/dev/null | grep -o 'ELF 64-bit.*' | head -1))"
+          else
+            echo "  proot:         SKIP (optional - Termux bootstrap includes proot)"
+          fi
+
+          # Check Box64
+          if [ -f "$ASSETS_DIR/box64/box64" ]; then
+            BOX64_SIZE=$(du -h $ASSETS_DIR/box64/box64 2>/dev/null | cut -f1)
+            BOX64_TYPE=$(file $ASSETS_DIR/box64/box64 2>/dev/null)
+            BOX64_SHA256=$(sha256sum $ASSETS_DIR/box64/box64 2>/dev/null | cut -d' ' -f1)
+            echo "  Box64 ARM64:  PASS ($BOX64_SIZE)"
+            echo "               Type: $BOX64_TYPE"
+            echo "               SHA256: $BOX64_SHA256"
+
+            # Verify it's actually ARM64, not x86_64
+            if echo "$BOX64_TYPE" | grep -qi "aarch64\|ARM aarch64"; then
+              echo "               Architecture: VERIFIED (AArch64)"
+            else
+              echo "  Box64 ARM64:  FAIL (wrong architecture!)"
+              ERRORS=$((ERRORS + 1))
+            fi
+
+            # Check Box64 ELF details
+            if [ -f "$ASSETS_DIR/box64/box64" ] && command -v readelf &> /dev/null; then
+              echo ""
+              echo "  Box64 ELF details:"
+              readelf -h $ASSETS_DIR/box64/box64 2>/dev/null | grep -E "Machine:|Class:|Type:|Entry point" || echo "  (readelf check failed)"
+            fi
+
+            # Check Box64 transparent layer (on-disk x86_64 exec wrapping).
+            # termdeb-x86_64-launcher replaces every x86_64 ELF on disk, termdeb-scan64
+            # scans for x86_64 executables, termdeb-wrapd keeps the wrap table fresh so
+            # binaries spawned by subprocesses (e.g. aapt2 under gradlew) get wrapped too.
+            # These replaced the legacy libbox64auto.so LD_PRELOAD interposer.
+            for LAYER_BIN in termdeb-x86_64-launcher termdeb-scan64 termdeb-wrapd; do
+              LAYER_PATH="$ASSETS_DIR/box64/$LAYER_BIN"
+              if [ -f "$LAYER_PATH" ]; then
+                LAYER_TYPE=$(file "$LAYER_PATH" 2>/dev/null)
+                echo "  $LAYER_BIN: PASS ($(du -h "$LAYER_PATH" 2>/dev/null | cut -f1))"
+                echo "               Type: $LAYER_TYPE"
+                if echo "$LAYER_TYPE" | grep -qi "aarch64\|ARM aarch64"; then
+                  echo "               Architecture: VERIFIED (AArch64)"
+                else
+                  echo "  $LAYER_BIN:   FAIL (wrong architecture!)"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              else
+                echo "  $LAYER_BIN:   FAIL (missing)"
+                ERRORS=$((ERRORS + 1))
+              fi
+            done
+
+            # Check Box64 x86_64 libraries (glibc runtime for emulated binaries)
+            if [ -f "$ASSETS_DIR/box64-libs/box64-libs.tar.gz" ]; then
+              LIBS_SIZE=$(du -h $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | cut -f1)
+              echo "  box64-libs:   PASS ($LIBS_SIZE)"
+              if command -v tar &> /dev/null; then
+                HAS_LIBC=$(tar tzf $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | grep -c "lib/x86_64-linux-gnu/libc.so.6" || true)
+                HAS_LIBC=$(tar tzf $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | grep -c "lib/x86_64-linux-gnu/libc.so.6" || true)
+                if [ "$HAS_LIBC" -gt 0 ]; then
+                  echo "               Contents: VERIFIED (libc.so.6 present)"
+                else
+                  echo "  box64-libs:   FAIL (missing libc.so.6 in archive)"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              fi
+            else
+              echo "  box64-libs:   FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          else
+            echo "  Box64 ARM64:  FAIL (missing)"
+            ERRORS=$((ERRORS + 1))
+
+            # Check Box64 ELF details
+            if [ -f "$ASSETS_DIR/box64/box64" ] && command -v readelf &> /dev/null; then
+              echo ""
+              echo "  Box64 ELF details:"
+              readelf -h $ASSETS_DIR/box64/box64 2>/dev/null | grep -E "Machine:|Class:|Type:|Entry point" || echo "  (readelf check failed)"
+            fi
+
+            # Check Box64 transparent layer
+            for LAYER_BIN in termdeb-x86_64-launcher termdeb-scan64 termdeb-wrapd; do
+              LAYER_PATH="$ASSETS_DIR/box64/$LAYER_BIN"
+              if [ -f "$LAYER_PATH" ]; then
+                LAYER_TYPE=$(file "$LAYER_PATH" 2>/dev/null)
+                echo "  $LAYER_BIN: PASS ($(du -h "$LAYER_PATH" 2>/dev/null | cut -f1))"
+                echo "               Type: $LAYER_TYPE"
+                if echo "$LAYER_TYPE" | grep -qi "aarch64\|ARM aarch64"; then
+                  echo "               Architecture: VERIFIED (AArch64)"
+                else
+                  echo "  $LAYER_BIN:   FAIL (wrong architecture!)"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              else
+                echo "  $LAYER_BIN:   FAIL (missing)"
+                ERRORS=$((ERRORS + 1))
+              fi
+            done
+
+            # Check Box64 x86_64 libraries
+            if [ -f "$ASSETS_DIR/box64-libs/box64-libs.tar.gz" ]; then
+              LIBS_SIZE=$(du -h $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | cut -f1)
+              echo "  box64-libs:   PASS ($LIBS_SIZE)"
+              if command -v tar &> /dev/null; then
+                HAS_LIBC=$(tar tzf $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | grep -c "lib/x86_64-linux-gnu/libc.so.6" || true)
+                HAS_LIBC=$(tar tzf $ASSETS_DIR/box64-libs/box64-libs.tar.gz 2>/dev/null | grep -c "lib/x86_64-linux-gnu/libc.so.6" || true)
+                if [ "$HAS_LIBC" -gt 0 ]; then
+                  echo "               Contents: VERIFIED (libc.so.6 present)"
+                else
+                  echo "  box64-libs:   FAIL (missing libc.so.6 in archive)"
+                  ERRORS=$((ERRORS + 1))
+                fi
+              fi
+            else
+              echo "  box64-libs:   FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          fi
+
+          # Reject Box64 layer helpers that still embed the pre-rename identity
+          # or rootfs path. This catches a committed prebuilt being used as a
+          # fallback after the source build failed: such a helper would point at
+          # com.qali.termbox / files/ubuntu-root and silently break x86_64 exec.
+          if [ -d "$ASSETS_DIR/box64" ]; then
+            for LAYER_BIN in termdeb-x86_64-launcher termdeb-scan64 termdeb-wrapd; do
+              LAYER_PATH="$ASSETS_DIR/box64/$LAYER_BIN"
+              [ -f "$LAYER_PATH" ] || continue
+              if strings "$LAYER_PATH" 2>/dev/null | grep -qE 'com\.qali\.termbox|ubuntu-root'; then
+                echo "  $LAYER_BIN: FAIL (stale identity/rootfs strings embedded - rebuild from source)"
+                ERRORS=$((ERRORS + 1))
+              else
+                echo "  $LAYER_BIN: identity/rootfs strings OK (com.qali.termdeb, files/debian-root)"
+              fi
+            done
+          fi
+
+          echo ""
+          echo "========================================="
+          if [ $ERRORS -gt 0 ]; then
+            echo "  RESULT: FAILED ($ERRORS error(s))"
+            echo "========================================="
+            exit 1
+          else
+            echo "  RESULT: ALL ASSETS VERIFIED"
+            echo "========================================="
+          fi
+
+      - name: Build release APKs
+        shell: bash {0}
+        env:
+          PACKAGE_VARIANT: ${{ matrix.package_variant }}
+        run: |
+          exit_on_error() { echo "$1"; exit 1; }
+
+          echo "Setting vars"
+
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+              GITHUB_SHA="${{ github.event.pull_request.head.sha }}"
+          fi
+
+          # Set RELEASE_VERSION_NAME
+          CURRENT_VERSION_NAME_REGEX='\s+versionName "([^"]+)"$'
+          CURRENT_VERSION_NAME="$(grep -m 1 -E "$CURRENT_VERSION_NAME_REGEX" ./app/build.gradle | sed -r "s/$CURRENT_VERSION_NAME_REGEX/\1/")"
+          RELEASE_VERSION_NAME="v$CURRENT_VERSION_NAME+${GITHUB_SHA:0:7}"
+          if ! printf "%s" "${RELEASE_VERSION_NAME/v/}" | grep -qP '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'; then
+           exit_on_error "The versionName '${RELEASE_VERSION_NAME/v/}' is not a valid semver."
+          fi
+
+          APK_DIR_PATH="./app/build/outputs/apk/release"
+          APK_VERSION_TAG="$RELEASE_VERSION_NAME-${{ env.PACKAGE_VARIANT }}-github-release"
+          APK_BASENAME_PREFIX="termdeb_$APK_VERSION_TAG"
+
+          echo "APK_DIR_PATH=$APK_DIR_PATH" >> $GITHUB_ENV
+          echo "APK_VERSION_TAG=$APK_VERSION_TAG" >> $GITHUB_ENV
+          echo "APK_BASENAME_PREFIX=$APK_BASENAME_PREFIX" >> $GITHUB_ENV
+
+          echo "Building release APKs for '$APK_VERSION_TAG'"
+          export TERMUX_APP_VERSION_NAME="${RELEASE_VERSION_NAME/v/}"
+          export TERMUX_APK_VERSION_TAG="$APK_VERSION_TAG"
+          export TERMUX_PACKAGE_VARIANT="${{ env.PACKAGE_VARIANT }}"
+          export TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS="1"
+
+          if ! ./gradlew assembleRelease; then
+            exit_on_error "Release build failed."
+          fi
+
+          echo "Built APKs:"
+          ls -lh "$APK_DIR_PATH"/*.apk 2>/dev/null || exit_on_error "No APKs found in $APK_DIR_PATH"
+
+          echo "Generating sha256sums"
+          (cd "$APK_DIR_PATH" && sha256sum *.apk > "${APK_BASENAME_PREFIX}_sha256sums") || true
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v6
+        with:
+          name: termdeb-release-${{ env.PACKAGE_VARIANT }}
+          path: |
+            ${{ env.APK_DIR_PATH }}/*.apk
+            ${{ env.APK_DIR_PATH }}/output-metadata.json
+          if-no-files-found: error

@@ -1,0 +1,123 @@
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory
+        app:key="adb_status"
+        app:title="@string/adb_status_header">
+
+        <Preference
+            app:key="adb_status"
+            app:persistent="false"
+            app:title="@string/adb_status_title"
+            app:summary="@string/adb_status_unconfigured" />
+
+        <Preference
+            app:key="adb_device"
+            app:persistent="false"
+            app:title="@string/adb_device_title"
+            app:summary="@string/adb_value_none"
+            app:isPreferenceVisible="false" />
+
+        <SwitchPreferenceCompat
+            app:key="adb_enabled"
+            app:title="@string/adb_enabled_title"
+            app:summaryOff="@string/adb_enabled_off"
+            app:summaryOn="@string/adb_enabled_on" />
+
+        <SwitchPreferenceCompat
+            app:key="adb_auto_reconnect"
+            app:title="@string/adb_auto_reconnect_title"
+            app:summaryOff="@string/adb_auto_reconnect_off"
+            app:summaryOn="@string/adb_auto_reconnect_on" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:key="adb_actions"
+        app:title="@string/adb_actions_header">
+
+        <Preference
+            app:key="adb_connect"
+            app:persistent="false"
+            app:title="@string/adb_connect_title"
+            app:summary="@string/adb_connect_summary" />
+
+        <Preference
+            app:key="adb_disconnect"
+            app:persistent="false"
+            app:title="@string/adb_disconnect_title"
+            app:summary="@string/adb_disconnect_summary" />
+
+        <Preference
+            app:key="adb_refresh"
+            app:persistent="false"
+            app:title="@string/adb_refresh_title" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:key="adb_wireless_header"
+        app:title="@string/adb_wireless_header">
+
+        <Preference
+            app:key="adb_wireless_status"
+            app:persistent="false"
+            app:title="@string/adb_wireless_status_title"
+            app:summary="@string/adb_wireless_not_paired" />
+
+        <Preference
+            app:key="adb_wireless_pair"
+            app:persistent="false"
+            app:title="@string/adb_wireless_pair_title"
+            app:summary="@string/adb_wireless_pair_summary" />
+
+        <Preference
+            app:key="adb_wireless_enable_no_wifi"
+            app:persistent="false"
+            app:title="@string/adb_wireless_enable_no_wifi_title"
+            app:summary="@string/adb_wireless_enable_no_wifi_summary" />
+
+        <Preference
+            app:key="adb_wireless_connect"
+            app:persistent="false"
+            app:title="@string/adb_wireless_connect_title"
+            app:summary="@string/adb_wireless_connect_summary" />
+
+        <Preference
+            app:key="adb_wireless_disconnect"
+            app:persistent="false"
+            app:title="@string/adb_wireless_disconnect_title"
+            app:summary="@string/adb_wireless_disconnect_summary" />
+
+        <Preference
+            app:key="adb_wireless_discover"
+            app:persistent="false"
+            app:title="@string/adb_wireless_discover_title"
+            app:summary="@string/adb_wireless_discover_summary" />
+
+        <Preference
+            app:key="adb_wireless_forget"
+            app:persistent="false"
+            app:title="@string/adb_wireless_forget_title"
+            app:summary="@string/adb_wireless_forget_summary" />
+
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:key="adb_about"
+        app:title="@string/adb_about_header">
+
+        <Preference
+            app:key="adb_public_key"
+            app:persistent="false"
+            app:title="@string/adb_public_key_title"
+            app:summary="@string/adb_public_key_summary" />
+
+        <Preference
+            app:key="adb_pairing_note"
+            app:persistent="false"
+            app:title="@string/adb_pairing_note_title"
+            app:summary="@string/adb_pairing_note_summary" />
+
+    </PreferenceCategory>
+
+</PreferenceScreen>

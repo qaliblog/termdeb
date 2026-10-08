@@ -1,0 +1,900 @@
+/**
+ * TermDeb Asset Preparation Build Script
+ *
+ * Downloads, builds, and prepares all runtime assets for the TermDeb offline APK.
+ *
+ * Assets:
+ *   - Bootstrap: Termux bootstrap packages (already built by downloadBootstraps in :app)
+ *   - proot-distro: Termux proot-distro scripts
+ *   - Debian 13 (trixie) ARM64: Official debuerreotype rootfs (same rootfs as Docker debian:trixie)
+ *   - Box64: Prebuilt glibc ARM64 binary from ryanfortner/box64-debs (runs inside Debian proot)
+ *
+ * Tasks:
+ *   prepareTermDebAssets - Download/build and prepare all assets for the APK
+ *   cleanTermDebAssets   - Remove downloaded and prepared assets
+ *   termdebBuildSummary  - Print build status summary
+ *
+ * Usage:
+ *   ./gradlew prepareTermDebAssets
+ *   ./gradlew assembleRelease (auto-runs prepareTermDebAssets if assets exist)
+ *   ./gradlew assembleRelease -PtermdebOffline=true
+ *   ./gradlew cleanTermDebAssets
+ */
+
+apply plugin: 'base'
+
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+import java.security.DigestInputStream
+
+// TermDeb configuration
+    ext {
+    termdebOffline = project.hasProperty('termdebOffline') ? project.property('termdebOffline').toBoolean() : false
+    provisionRootfs = project.hasProperty('provisionRootfs') ? project.property('provisionRootfs').toBoolean() : true
+
+    // Asset directories
+    termdebAssetsDir = new File(project.rootDir, 'termdeb-assets')
+    termdebCacheDir = new File(project.rootDir, 'build/termdeb-assets')
+    termdebDownloadsDir = new File(termdebCacheDir, 'downloads')
+    termdebExtractedDir = new File(termdebCacheDir, 'extracted')
+    termdebBuildDir = new File(termdebCacheDir, 'build')
+    termdebManifestDir = new File(termdebCacheDir, 'manifest')
+
+    // APK asset destination (inside app module)
+    termdebApkAssetsDir = new File(project.rootDir, 'app/src/main/assets/termdeb-runtime')
+
+
+}
+
+/**
+ * Calculate SHA-256 hash of a file
+ */
+def calculateSha256(File file) {
+    def digest = MessageDigest.getInstance("SHA-256")
+    def buffer = new byte[8192]
+    def input = new FileInputStream(file)
+    def digestStream = new DigestInputStream(input, digest)
+    while (digestStream.read(buffer) != -1) { /* read to calculate digest */ }
+    digestStream.close()
+    def hash = new BigInteger(1, digest.digest()).toString(16)
+    while (hash.length() < 64) { hash = "0" + hash }
+    return hash
+}
+
+/**
+ * Download a file with optional SHA-256 verification and idempotent caching
+ */
+def downloadAsset(String name, String url, String expectedSha256, File destFile, boolean offline) {
+    // Check if file already exists and is valid
+    if (destFile.exists() && destFile.length() > 0) {
+        if (expectedSha256 != null && !expectedSha256.isEmpty() && !expectedSha256.startsWith("PLACEHOLDER")) {
+            def actualSha256 = calculateSha256(destFile)
+            if (actualSha256 == expectedSha256) {
+                logger.quiet("  [${name}] Asset already cached and verified: ${destFile.name}")
+                return true
+            } else {
+                logger.quiet("  [${name}] Cached file has wrong hash, re-downloading...")
+                destFile.delete()
+            }
+        } else {
+            logger.quiet("  [${name}] Using existing file: ${destFile.name} (${destFile.length()} bytes)")
+            return true
+        }
+    }
+
+    // Check offline mode
+    if (offline) {
+        throw new GradleException("TermDeb asset '${name}' missing and offline mode is enabled. " +
+            "Place the asset at: ${destFile.absolutePath}")
+    }
+
+    // Download
+    logger.quiet("  [${name}] Downloading from: ${url}")
+    destFile.parentFile.mkdirs()
+
+    // Download to .part file first (atomic download)
+    def partFile = new File(destFile.parentFile, destFile.name + ".part")
+    try {
+        def connection = new URL(url).openConnection()
+        connection.setInstanceFollowRedirects(true)
+        connection.setConnectTimeout(30000)
+        connection.setReadTimeout(120000)
+
+        def out = new BufferedOutputStream(new FileOutputStream(partFile))
+        if (expectedSha256 != null && !expectedSha256.isEmpty() && !expectedSha256.startsWith("PLACEHOLDER")) {
+            def digest = MessageDigest.getInstance("SHA-256")
+            def digestStream = new DigestInputStream(connection.inputStream, digest)
+            out << digestStream
+            out.close()
+
+            def actualSha256 = new BigInteger(1, digest.digest()).toString(16)
+            while (actualSha256.length() < 64) { actualSha256 = "0" + actualSha256 }
+
+            if (actualSha256 != expectedSha256) {
+                partFile.delete()
+                throw new GradleException("  [${name}] SHA-256 mismatch!\n    Expected: ${expectedSha256}\n    Actual:   ${actualSha256}")
+            }
+        } else {
+            out << connection.inputStream
+            out.close()
+        }
+
+        // Rename .part to final file (atomic)
+        if (destFile.exists()) destFile.delete()
+        partFile.renameTo(destFile)
+        logger.quiet("  [${name}] Downloaded: ${destFile.name} (${destFile.length()} bytes)")
+        return true
+
+    } catch (Exception e) {
+        partFile.delete()
+        throw new GradleException("  [${name}] Download failed: ${e.message}", e)
+    }
+}
+
+/**
+ * Execute a command and return success/failure
+ */
+def execCommand(String description, String... command) {
+    logger.quiet("  [exec] ${description}")
+    def process = command.execute()
+    def stdout = new StringBuilder()
+    def stderr = new StringBuilder()
+    process.consumeProcessOutput(stdout, stderr)
+    process.waitFor()
+    if (process.exitValue() != 0) {
+        logger.quiet("  [exec] Failed (exit code ${process.exitValue()}): ${stderr.toString().trim()}")
+        return false
+    }
+    return true
+}
+
+/**
+ * Create the prepareTermDebAssets task
+ */
+task prepareTermDebAssets {
+    description = 'Downloads, builds, and prepares all TermDeb runtime assets for offline APK packaging'
+    group = 'TermDeb'
+
+    doLast {
+        logger.quiet("\n========================================")
+        logger.quiet("        TermDeb Asset Preparation")
+        logger.quiet("========================================\n")
+
+        // Load manifest
+        def manifestFile = new File(termdebAssetsDir, 'manifest.json')
+        if (!manifestFile.exists()) {
+            throw new GradleException("TermDeb manifest not found at: ${manifestFile.absolutePath}")
+        }
+        def manifest = new JsonSlurper().parse(manifestFile)
+
+        // Ensure directories exist
+        termdebDownloadsDir.mkdirs()
+        termdebExtractedDir.mkdirs()
+        termdebBuildDir.mkdirs()
+        termdebManifestDir.mkdirs()
+        termdebApkAssetsDir.mkdirs()
+
+        def assetsReady = 0
+        def warnings = []
+
+        // ========================================
+        // 1. PROOT-DISTRO
+        // ========================================
+        logger.quiet("\n--- Preparing proot-distro ---")
+        def prootDistro = manifest.'proot-distro'
+        try {
+            def prootDistroFile = new File(termdebDownloadsDir, prootDistro.filename)
+            if (downloadAsset("proot-distro", prootDistro.url, prootDistro.sha256, prootDistroFile, termdebOffline)) {
+                // Extract proot-distro source tree
+                def extractDir = new File(termdebExtractedDir, 'proot-distro')
+                if (!extractDir.exists()) {
+                    extractDir.mkdirs()
+                    def cmd = "tar -xzf ${prootDistroFile.absolutePath} -C ${extractDir.absolutePath} --strip-components=1"
+                    if (!execCommand("Extract proot-distro", "sh", "-c", cmd)) {
+                        throw new GradleException("Failed to extract proot-distro")
+                    }
+                }
+                // Copy to APK assets
+                def apkPdDir = new File(termdebApkAssetsDir, "proot-distro")
+                apkPdDir.mkdirs()
+                execCommand("Copy proot-distro to APK assets",
+                    "sh", "-c", "cp -r ${extractDir.absolutePath}/. ${apkPdDir.absolutePath}/")
+                logger.quiet("  [proot-distro] READY (v${prootDistro.version})")
+                assetsReady++
+            }
+        } catch (Exception e) {
+            logger.warn("  [proot-distro] Warning: ${e.message}")
+            warnings << "proot-distro: ${e.message}"
+        }
+
+        // ========================================
+        // 2. DEBIAN ARM64 ROOTFS (official debuerreotype rootfs, direct download)
+        // ========================================
+        logger.quiet("\n--- Preparing Debian trixie ARM64 Rootfs ---")
+        def debian = manifest.debian
+        def debianTar = new File(termdebDownloadsDir, debian.filename)
+
+        try {
+            if (downloadAsset("debian", debian.url, debian.sha256, debianTar, termdebOffline)) {
+                def apkDebian = new File(termdebApkAssetsDir, "debian/debian-trixie-arm64.tar.gz")
+                apkDebian.parentFile.mkdirs()
+
+                if (provisionRootfs && !termdebOffline) {
+                    // ---- PRE-PROVISIONED MODE ----
+                    // Check if the existing APK assets tarball is already provisioned.
+                    // A provisioned rootfs is significantly larger (~41MB) than the raw
+                    // Debian trixie rootfs (~48MB) and contains the /etc/termdeb-provisioned marker.
+                    boolean alreadyProvisioned = false
+                    if (apkDebian.exists()) {
+                        // Check for the marker inside the tarball
+                        try {
+                            def checkCmd = "tar -tzf ${apkDebian.absolutePath} 2>/dev/null | grep -c etc/termdeb-provisioned"
+                            def proc = ["sh", "-c", checkCmd].execute()
+                            def output = new StringBuilder()
+                            proc.consumeProcessOutput(output, new StringBuilder())
+                            proc.waitFor()
+                            if (proc.exitValue() == 0 && output.toString().trim().toInteger() > 0) {
+                                alreadyProvisioned = true
+                                logger.quiet("  [debian] APK assets already contain a provisioned rootfs (${apkDebian.length() / (1024*1024)} MB) - skipping re-provisioning.")
+                            }
+                        } catch (Exception ignored) { /* not provisioned or can't read */ }
+                    }
+
+                    if (alreadyProvisioned) {
+                        // Already provisioned - just use it as-is
+                        assetsReady++
+                    } else {
+                    // Extract the Debian trixie rootfs tarball, run apt-get install inside Docker
+                    // with QEMU ARM64 emulation to pre-install systemd, dbus, ca-certificates,
+                    // locales. The result is a fully provisioned rootfs that needs no online
+                    // initialization at first launch.
+                    // Graceful fallback: if Docker/QEMU is unavailable, fall back to standard mode.
+                    boolean provisioned = false
+                    try {
+                        logger.quiet("  [debian] Pre-provisioning rootfs (systemd, dbus, ca-certificates, locales)...")
+                        def provisionStaging = new File(termdebBuildDir, 'debian-provisioned-staging')
+                        if (provisionStaging.exists()) provisionStaging.deleteDir()
+                        provisionStaging.mkdirs()
+
+                        // Extract Debian trixie rootfs tarball
+                        logger.quiet("  [debian] Extracting Debian trixie rootfs to staging...")
+                        if (!execCommand("Extract Debian trixie rootfs",
+                            "sh", "-c", "tar -xzf ${debianTar.absolutePath} -C ${provisionStaging.absolutePath}")) {
+                            throw new GradleException("Failed to extract Debian trixie rootfs tarball for provisioning")
+                        }
+
+                        // Run the provisioning script (Docker + QEMU ARM64 emulation)
+                        def provisionScript = new File(termdebAssetsDir, 'prebuilt/provision-rootfs.sh')
+                        if (!provisionScript.exists()) {
+                            throw new GradleException("Provisioning script not found: ${provisionScript.absolutePath}")
+                        }
+                        def provisionCmd = "bash ${provisionScript.absolutePath} ${provisionStaging.absolutePath}"
+                        logger.quiet("  [debian] Running: ${provisionCmd}")
+                        if (!execCommand("Pre-provision Debian rootfs",
+                            "sh", "-c", provisionCmd)) {
+                            throw new GradleException("Rootfs provisioning failed (is Docker with QEMU ARM64 available?)")
+                        }
+
+                        // Re-tar the provisioned rootfs
+                        logger.quiet("  [debian] Re-tarring provisioned rootfs...")
+                        def provisionedTar = new File(termdebBuildDir, 'debian-trixie-arm64-provisioned.tar.gz')
+                        if (provisionedTar.exists()) provisionedTar.delete()
+                        if (!execCommand("Pack provisioned rootfs",
+                            "sh", "-c", "tar -czf ${provisionedTar.absolutePath} --warning=failed-read -C ${provisionStaging.absolutePath} .")) {
+                            throw new GradleException("Failed to re-tar provisioned rootfs")
+                        }
+
+                        // Copy provisioned tarball to APK assets
+                        java.nio.file.Files.copy(provisionedTar.toPath(), apkDebian.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        logger.quiet("  [debian] READY PRE-PROVISIONED (trixie ARM64, ${apkDebian.length() / (1024*1024)} MB)")
+                        logger.quiet("  [debian] Packages: systemd, dbus, ca-certificates, locales (bundled in rootfs)")
+                        provisioned = true
+                        assetsReady++
+
+                        // Clean up staging
+                        provisionStaging.deleteDir()
+                    } catch (Exception e) {
+                        logger.warn("  [debian] Pre-provisioning failed: ${e.message}")
+                        logger.warn("  [debian] Falling back to standard (un-provisioned) rootfs.")
+                        logger.warn("  [debian] To fix: install Docker + QEMU ARM64 (docker run --privileged --rm tonistiigi/binfmt --install all)")
+                        warnings << "debian pre-provisioning: ${e.message}"
+                    }
+
+                    if (!provisioned) {
+                        // Fall back: copy raw Debian trixie rootfs tarball to APK assets
+                        if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
+                            java.nio.file.Files.copy(debianTar.toPath(), apkDebian.toPath(),
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        }
+                        logger.quiet("  [debian] READY (trixie ARM64, STANDARD MODE, ${debianTar.length() / (1024*1024)} MB)")
+                        assetsReady++
+                    }
+                    } // end !alreadyProvisioned
+                } else {
+                    // ---- STANDARD MODE (no pre-provisioning) ----
+                    // Copy raw Debian trixie rootfs tarball to APK assets.
+                    // Provisioning (apt-get install) runs at first launch inside the device.
+                    if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
+                        java.nio.file.Files.copy(debianTar.toPath(), apkDebian.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    }
+                    logger.quiet("  [debian] READY (trixie ARM64, ${debianTar.length() / (1024*1024)} MB)")
+                    if (provisionRootfs && termdebOffline) {
+                        logger.quiet("  [debian] NOTE: -PprovisionRootfs=true ignored (offline mode)")
+                    }
+                    assetsReady++
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("  [debian] Warning: ${e.message}")
+            warnings << "debian: ${e.message}"
+        }
+
+        // ========================================
+        // 2.5 PROOT (Termux proot binary + runtime libraries)
+        // ========================================
+        logger.quiet("\n--- Preparing proot ---")
+        def proot = manifest.proot
+        def prootDestDir = new File(termdebApkAssetsDir, "proot")
+
+        try {
+            // Extract all three .debs into one staging tree, then copy the files proot
+            // needs into the APK assets under termdeb-runtime/proot/{bin,libexec,lib}.
+            def prootStaging = new File(termdebExtractedDir, 'proot')
+            if (prootStaging.exists()) prootStaging.deleteDir()
+            prootStaging.mkdirs()
+
+            def allExtracted = true
+            proot.packages.each { pkg ->
+                def debFile = new File(termdebDownloadsDir, pkg.filename)
+                if (!downloadAsset("proot-" + pkg.name, pkg.url, pkg.sha256, debFile, termdebOffline)) {
+                    allExtracted = false
+                    return
+                }
+
+                def pkgDir = new File(termdebExtractedDir, 'proot-' + pkg.name)
+                if (pkgDir.exists()) pkgDir.deleteDir()
+                pkgDir.mkdirs()
+
+                if (!execCommand("Extract " + pkg.name + " .deb",
+                    "sh", "-c", "ar -x ${debFile.absolutePath} --output=${pkgDir.absolutePath}")) {
+                    throw new GradleException("Failed to extract " + pkg.name + " .deb")
+                }
+
+                def dataTar = new File(pkgDir, 'data.tar.xz')
+                if (!dataTar.exists()) dataTar = new File(pkgDir, 'data.tar.zst')
+                if (!dataTar.exists()) dataTar = new File(pkgDir, 'data.tar.gz')
+                if (!dataTar.exists()) {
+                    throw new GradleException("data.tar.* not found in " + pkg.name + " .deb. Contents: ${pkgDir.listFiles()?.collect { it.name }?.join(', ')}")
+                }
+
+                def dataDir = new File(pkgDir, 'data')
+                dataDir.mkdirs()
+                if (!execCommand("Extract " + pkg.name + " data archive",
+                    "sh", "-c", "tar -xaf ${dataTar.absolutePath} -C ${dataDir.absolutePath}")) {
+                    throw new GradleException("Failed to extract " + pkg.name + " data archive")
+                }
+
+                // Merge extracted tree into shared staging dir
+                if (!execCommand("Merge " + pkg.name + " files",
+                    "sh", "-c", "cp -r ${dataDir.absolutePath}/. ${prootStaging.absolutePath}/")) {
+                    throw new GradleException("Failed to merge " + pkg.name + " files")
+                }
+            }
+
+            if (allExtracted) {
+                // Files are unpacked under data/data/com.termux/files/usr/...
+                def usrDir = new File(prootStaging, 'data/data/com.termux/files/usr')
+                if (!usrDir.exists()) {
+                    throw new GradleException("Unexpected proot package layout: " + prootStaging.absolutePath)
+                }
+
+                def srcProot = new File(usrDir, 'bin/proot')
+                if (!srcProot.exists()) {
+                    throw new GradleException("proot binary not found in extracted .deb")
+                }
+
+                // Copy proot binary
+                def destProot = new File(prootDestDir, 'bin/proot')
+                destProot.parentFile.mkdirs()
+                java.nio.file.Files.copy(srcProot.toPath(), destProot.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+
+                // Copy loaders (statically linked, used by proot to run guest binaries)
+                ['loader', 'loader32'].each { loaderName ->
+                    def srcLoader = new File(usrDir, 'libexec/proot/' + loaderName)
+                    if (srcLoader.exists()) {
+                        def destLoader = new File(prootDestDir, 'libexec/' + loaderName)
+                        destLoader.parentFile.mkdirs()
+                        java.nio.file.Files.copy(srcLoader.toPath(), destLoader.toPath(),
+                            java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    }
+                }
+
+                // Copy runtime libraries into proot/lib. libtalloc.so.2 is the SONAME that
+                // the proot binary links against, so the file must be stored under that name
+                // (assets cannot carry symlinks reliably).
+                def destLibDir = new File(prootDestDir, 'lib')
+                destLibDir.mkdirs()
+                def srcShmem = new File(usrDir, 'lib/libandroid-shmem.so')
+                if (srcShmem.exists()) {
+                    java.nio.file.Files.copy(srcShmem.toPath(), new File(destLibDir, 'libandroid-shmem.so').toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+                def srcTalloc = new File(usrDir, 'lib/libtalloc.so.2.4.3')
+                if (srcTalloc.exists()) {
+                    java.nio.file.Files.copy(srcTalloc.toPath(), new File(destLibDir, 'libtalloc.so.2').toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+
+                logger.quiet("  [proot] READY (v${proot.version}, ${destProot.length()} bytes)")
+                assetsReady++
+            }
+        } catch (Exception e) {
+            logger.warn("  [proot] Warning: ${e.message}")
+            warnings << "proot: ${e.message}"
+        }
+
+        // ========================================
+        // 3. BOX64 (prebuilt glibc ARM64 from ryanfortner/box64-debs)
+        // ========================================
+        logger.quiet("\n--- Preparing Box64 ---")
+        def box64 = manifest.box64
+        def box64Binary = new File(termdebApkAssetsDir, "box64/box64")
+
+        try {
+            // Prefer the committed patched box64 (termdeb-assets/prebuilt/box64/box64):
+            // built from ptitSeb/box64 with the MAP_FIXED fix (box64-mapfixed.patch) so
+            // fixed-address (ET_EXEC) binaries like Bun-compiled opencode load correctly.
+            // This is the source of truth for what ships in the APK. The download path
+            // below only kicks in when the prebuilt binary is absent.
+            def prebuiltBox64 = new File(termdebAssetsDir, 'prebuilt/box64/box64')
+            if (prebuiltBox64.exists() && prebuiltBox64.length() > 0) {
+                box64Binary.parentFile.mkdirs()
+                java.nio.file.Files.copy(prebuiltBox64.toPath(), box64Binary.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                logger.quiet("  [box64] Using committed patched prebuilt binary (${box64Binary.length()} bytes)")
+                assetsReady++
+            } else if (box64Binary.exists() && box64Binary.length() > 0) {
+                logger.quiet("  [box64] Using existing binary: ${box64Binary.name} (${box64Binary.length()} bytes)")
+                assetsReady++
+            } else if (termdebOffline) {
+                throw new GradleException("Box64 binary missing and offline mode enabled")
+            } else {
+                // Download prebuilt Box64 .deb from ryanfortner/box64-debs
+                // This is a glibc-linked ARM64 binary that runs inside the Debian proot rootfs.
+                logger.quiet("  [box64] Downloading prebuilt glibc Box64 from APT repo...")
+                def debFile = new File(termdebDownloadsDir, box64.deb_filename)
+                if (!downloadAsset("box64-deb", box64.deb_url, box64.deb_sha256, debFile, termdebOffline)) {
+                    throw new GradleException("Failed to download Box64 .deb")
+                }
+
+                // Extract the .deb: it's an 'ar' archive containing data.tar.xz
+                def extractDir = new File(termdebExtractedDir, 'box64-deb')
+                if (extractDir.exists()) extractDir.deleteDir()
+                extractDir.mkdirs()
+
+                logger.quiet("  [box64] Extracting .deb archive...")
+                // ar x to get data.tar.xz
+                if (!execCommand("Extract .deb",
+                    "sh", "-c", "ar -x ${debFile.absolutePath} --output=${extractDir.absolutePath}")) {
+                    throw new GradleException("Failed to extract .deb (is 'ar' available?)")
+                }
+
+                def dataTar = new File(extractDir, 'data.tar.xz')
+                if (!dataTar.exists()) {
+                    // Some .debs use data.tar.zst or data.tar.gz
+                    dataTar = new File(extractDir, 'data.tar.zst') ?: new File(extractDir, 'data.tar.gz')
+                    if (!dataTar.exists()) {
+                        throw new GradleException("data.tar.* not found in .deb. Contents: ${extractDir.listFiles()?.collect { it.name }?.join(', ')}")
+                    }
+                }
+
+                logger.quiet("  [box64] Extracting data archive: ${dataTar.name}")
+                def dataDir = new File(extractDir, 'data')
+                dataDir.mkdirs()
+                // Use --auto-compress to let tar detect the compression format
+                if (!execCommand("Extract data archive",
+                    "sh", "-c", "tar -xaf ${dataTar.absolutePath} -C ${dataDir.absolutePath}")) {
+                    throw new GradleException("Failed to extract data archive")
+                }
+
+                // Find the box64 binary
+                def binaryPath = box64.binary_path_in_deb ?: 'usr/local/bin/box64'
+                def extractedBinary = new File(dataDir, binaryPath)
+                if (!extractedBinary.exists()) {
+                    // Search for it
+                    def findResult = ["find", dataDir.absolutePath, "-name", "box64", "-type", "f"].execute()
+                    def findOutput = new StringBuilder()
+                    findResult.consumeProcessOutput(findOutput, new StringBuilder())
+                    findResult.waitFor()
+                    def found = findOutput.toString().trim().split('\n')
+                    if (found.length > 0 && found[0]) {
+                        extractedBinary = new File(found[0])
+                    } else {
+                        throw new GradleException("Box64 binary not found in extracted .deb")
+                    }
+                }
+                logger.quiet("  [box64] Found binary: ${extractedBinary.absolutePath}")
+
+                // Verify it's ARM64 glibc (NOT Bionic)
+                def fileCmd = "file ${extractedBinary.absolutePath}"
+                def fileProcess = fileCmd.execute()
+                def fileOutput = new StringBuilder()
+                fileProcess.consumeProcessOutput(fileOutput, new StringBuilder())
+                fileProcess.waitFor()
+                def fileType = fileOutput.toString().trim()
+                logger.quiet("  [box64] Binary type: ${fileType}")
+
+                if (!fileType.contains("aarch64") && !fileType.contains("ARM aarch64")) {
+                    throw new GradleException("Box64 binary is not ARM64! Got: ${fileType}")
+                }
+                if (!fileType.contains("dynamically linked") || !fileType.contains("libc.so")) {
+                    logger.quiet("  [box64] WARNING: Expected glibc-linked binary. Type: ${fileType}")
+                }
+
+                // Copy to APK assets
+                box64Binary.parentFile.mkdirs()
+                java.nio.file.Files.copy(extractedBinary.toPath(), box64Binary.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                logger.quiet("  [box64] READY (v${box64.version}, ARM64 glibc, ${box64Binary.length()} bytes)")
+                assetsReady++
+            }
+        } catch (Exception e) {
+            // Box64 is REQUIRED - fail the build if it cannot be built
+            throw new GradleException("Box64 build FAILED (required for TermDeb offline runtime): ${e.message}", e)
+        }
+
+        // ========================================
+        // 3.5 BOX64 TRANSPARENT LAYER (ARM64 helpers built from source)
+        // ========================================
+        // The three helpers embed paths that depend on the app identity and the
+        // guest rootfs layout (com.qali.termdeb, files/debian-root, the termdeb-*
+        // tool names, the .termdeb-x86_64 backup dir). They are therefore built
+        // FROM SOURCE with the NDK instead of copied from a committed prebuilt,
+        // which would still point at the old package/rootfs names. The committed
+        // prebuilts remain only as a last-resort fallback.
+        logger.quiet("\n--- Preparing Box64 transparent layer ---")
+        try {
+            def layerBuildScript = new File(termdebAssetsDir, 'prebuilt/box64/build-box64-layer.sh')
+            if (!layerBuildScript.exists()) {
+                throw new GradleException("Box64 layer build script not found at ${layerBuildScript.absolutePath}")
+            }
+
+            def layerStaging = new File(termdebBuildDir, 'box64-layer')
+            if (layerStaging.exists()) layerStaging.deleteDir()
+            layerStaging.mkdirs()
+
+            def helperNames = ['termdeb-x86_64-launcher', 'termdeb-scan64', 'termdeb-wrapd']
+            boolean sourceOk = execCommand("Build Box64 transparent layer from source",
+                "sh", layerBuildScript.absolutePath, layerStaging.absolutePath)
+            if (sourceOk) {
+                helperNames.each { n ->
+                    def f = new File(layerStaging, n)
+                    if (!f.exists() || f.length() <= 0) sourceOk = false
+                }
+            }
+
+            def box64LayerDir = new File(termdebApkAssetsDir, 'box64')
+            box64LayerDir.mkdirs()
+
+            if (sourceOk) {
+                helperNames.each { n ->
+                    java.nio.file.Files.copy(new File(layerStaging, n).toPath(),
+                        new File(box64LayerDir, n).toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    logger.quiet("  [box64-layer] READY (${n}, built from source)")
+                }
+                assetsReady++
+            } else {
+                logger.warn("  [box64-layer] Source build unavailable; falling back to committed prebuilt helpers.")
+                helperNames.each { n ->
+                    def src = new File(termdebAssetsDir, "prebuilt/box64/${n}")
+                    if (!src.exists() || src.length() <= 0) {
+                        throw new GradleException("Box64 layer helper '${n}' could not be built from source " +
+                            "and no committed prebuilt exists")
+                    }
+                    java.nio.file.Files.copy(src.toPath(), new File(box64LayerDir, n).toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    logger.quiet("  [box64-layer] READY (${n}, prebuilt fallback)")
+                }
+                assetsReady++
+            }
+        } catch (Exception e) {
+            logger.warn("  [box64-layer] Warning: ${e.message}")
+            warnings << "box64-layer: ${e.message}"
+        }
+
+        // The legacy LD_PRELOAD execve interposer (libbox64auto.so) is no longer
+        // installed or injected: it only intercepted glibc execve/execv made through
+        // public symbols, so JDK 17's ProcessBuilder (jspawnhelper -> execvp)
+        // bypassed it and ARM64 processes were preloaded needlessly. The on-disk
+        // launcher above cannot be bypassed. The .so stays in prebuilt/ only as
+        // reference.
+
+        // ========================================
+        // 3.6 BOX64 X86_64 LIBS (glibc runtime for emulated binaries)
+        // ========================================
+        logger.quiet("\n--- Preparing Box64 x86_64 libraries ---")
+        def box64Libs = manifest.'box64-libs'
+        try {
+            def staging = new File(termdebExtractedDir, 'box64-libs')
+            if (staging.exists()) staging.deleteDir()
+            staging.mkdirs()
+
+            def allExtracted = true
+            box64Libs.packages.each { pkg ->
+                def debFile = new File(termdebDownloadsDir, pkg.filename)
+                if (!downloadAsset("box64libs-" + pkg.name, pkg.url, pkg.sha256, debFile, termdebOffline)) {
+                    allExtracted = false
+                    return
+                }
+                def pkgDir = new File(termdebExtractedDir, 'box64libs-' + pkg.name)
+                if (pkgDir.exists()) pkgDir.deleteDir()
+                pkgDir.mkdirs()
+                // dpkg-deb handles zstd/xz/gz data archives; available on Debian/Ubuntu builders
+                // (including CI's ubuntu-latest).
+                if (!execCommand("Extract " + pkg.name + " .deb",
+                    "sh", "-c", "dpkg-deb -x ${debFile.absolutePath} ${pkgDir.absolutePath}")) {
+                    throw new GradleException("Failed to extract " + pkg.name + " .deb with dpkg-deb")
+                }
+                if (!execCommand("Merge " + pkg.name + " files",
+                    "sh", "-c", "cp -r ${pkgDir.absolutePath}/. ${staging.absolutePath}/")) {
+                    throw new GradleException("Failed to merge " + pkg.name + " files")
+                }
+            }
+
+            if (allExtracted) {
+                def ldSrc = new File(staging, 'usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
+                if (ldSrc.exists()) {
+                    // Real file, not a symlink: assets cannot carry symlinks reliably.
+                    // Staged at lib64/ld-linux-x86-64.so.2 (top-level) so the archive
+                    // entry lands directly on the guest's /lib64/... path.
+                    def ldReal = new File(staging, 'lib64/ld-linux-x86-64.so.2')
+                    ldReal.parentFile.mkdirs()
+                    java.nio.file.Files.copy(ldSrc.toPath(), ldReal.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+
+                def tarOut = new File(termdebApkAssetsDir, 'box64-libs/box64-libs.tar.gz')
+                tarOut.parentFile.mkdirs()
+                // Deterministic tar (fixed mtime/owner/sort order) so the archive
+                // checksum is stable across builds and machines.
+                // NOTE: entries live under usr/lib/x86_64-linux-gnu (NOT a top-level
+                // lib/ entry): extracting a top-level lib/ directory would clobber the
+                // guest's /lib -> usr/lib symlink and break every ARM64 binary in the
+                // rootfs. The guest's /lib symlink resolves usr/lib/x86_64-linux-gnu.
+                if (!execCommand("Pack box64-libs archive",
+                    "sh", "-c", "tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -czf ${tarOut.absolutePath} -C ${staging.absolutePath} usr/lib/x86_64-linux-gnu lib64/ld-linux-x86-64.so.2")) {
+                    throw new GradleException("Failed to pack box64-libs archive")
+                }
+
+                def expected = box64Libs.archive.sha256
+                def actual = calculateSha256(tarOut)
+                if (expected && expected != actual) {
+                    logger.warn("  [box64-libs] SHA-256 mismatch (got ${actual}, expected ${expected})")
+                    warnings << "box64-libs sha256 mismatch"
+                } else {
+                    logger.quiet("  [box64-libs] READY (${tarOut.length() / (1024*1024)} MB, sha256 ${actual.take(12)}...)")
+                    assetsReady++
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("  [box64-libs] Warning: ${e.message}")
+            warnings << "box64-libs: ${e.message}"
+        }
+
+        // ========================================
+        // 3.7 ADB BRIDGE GUEST CLIENT (/usr/bin/adb)
+        // ========================================
+        // The client is always built FROM SOURCE when an NDK is available (CI
+        // installs one explicitly), so adb_client.c changes ship without anyone
+        // having to remember to refresh a committed binary. The committed
+        // prebuilt at termdeb-assets/prebuilt/adb/adb is only a fallback for
+        // builds without an NDK (e.g. quick local asset preparation).
+        logger.quiet("\n--- Preparing ADB bridge guest client ---")
+        try {
+            def adbBuildScript = new File(termdebAssetsDir, 'prebuilt/adb/build-adb-client.sh')
+            def adbPrebuilt = new File(termdebAssetsDir, 'prebuilt/adb/adb')
+            def adbDest = new File(termdebApkAssetsDir, 'adb/adb')
+            adbDest.parentFile.mkdirs()
+            boolean adbBuilt = false
+            if (adbBuildScript.exists()) {
+                def buildCmd = "sh ${adbBuildScript.absolutePath} ${adbDest.absolutePath}"
+                if (execCommand("Build adb guest client", "sh", "-c", buildCmd)
+                        && adbDest.exists() && adbDest.length() > 0) {
+                    // Verify the produced binary is a static ARM64 ELF; refuse to
+                    // package a client that cannot run in the ARM64 guest rootfs.
+                    def probe = ["sh", "-c", "file ${adbDest.absolutePath}"].execute()
+                    def probeOut = new StringBuilder()
+                    probe.consumeProcessOutput(probeOut, new StringBuilder())
+                    probe.waitFor()
+                    def fileType = probeOut.toString().trim()
+                    def isArm64 = fileType.contains("aarch64") || fileType.contains("ARM aarch64")
+                    def isStatic = fileType.contains("statically linked") || fileType.contains("static-pie")
+                    if (isArm64 && isStatic) {
+                        logger.quiet("  [adb] Built guest client from source (${adbDest.length()} bytes, ARM64 static)")
+                        adbBuilt = true
+                    } else {
+                        logger.warn("  [adb] Built client failed verification (${fileType})")
+                    }
+                }
+            }
+            if (!adbBuilt && adbPrebuilt.exists() && adbPrebuilt.length() > 0) {
+                // Fallback for NDK-less builds: committed binary.
+                java.nio.file.Files.copy(adbPrebuilt.toPath(), adbDest.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                logger.quiet("  [adb] Using committed prebuilt client (${adbPrebuilt.length()} bytes)")
+                adbBuilt = true
+            }
+            if (!adbBuilt) {
+                throw new GradleException("adb client could not be built from source and no prebuilt binary exists")
+            }
+            assetsReady++
+        } catch (Exception e) {
+            logger.warn("  [adb] Warning: ${e.message}")
+            warnings << "adb client: ${e.message}"
+        }
+
+        // ========================================
+        // 4. TERMDEB CONFIGURATION FILES
+        // ========================================
+        logger.quiet("\n--- Copying TermDeb Configuration ---")
+        def configSource = new File(termdebAssetsDir, 'config')
+        def configDest = new File(termdebApkAssetsDir, 'config')
+        configDest.mkdirs()
+        if (configSource.exists()) {
+            configSource.listFiles()?.each { file ->
+                if (file.isFile()) {
+                    java.nio.file.Files.copy(file.toPath(), new File(configDest, file.name).toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+            logger.quiet("  [config] Configuration files copied")
+        }
+
+        // ========================================
+        // 5. LICENSE FILE
+        // ========================================
+        def licenseSource = new File(project.rootDir, 'app/src/main/res/raw/termdeb_licenses.txt')
+        if (licenseSource.exists()) {
+            def licenseDest = new File(termdebApkAssetsDir, 'LICENSES.txt')
+            java.nio.file.Files.copy(licenseSource.toPath(), licenseDest.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            logger.quiet("  [licenses] License file copied")
+        }
+
+        // ========================================
+        // WRITE RESOLVED MANIFEST
+        // ========================================
+        def resolvedManifest = [
+            timestamp: new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+            offline_mode: termdebOffline,
+            assets_ready: assetsReady,
+            warnings: warnings,
+            manifest_hash: calculateSha256(manifestFile)
+        ]
+        new File(termdebManifestDir, 'resolved-assets.json').text =
+            new groovy.json.JsonBuilder(resolvedManifest).toPrettyString()
+
+        // ========================================
+        // SUMMARY
+        // ========================================
+        logger.quiet("\n========================================")
+        logger.quiet("    TermDeb Asset Preparation Complete")
+        logger.quiet("========================================")
+        logger.quiet("  Offline mode: ${termdebOffline}")
+        logger.quiet("  Assets ready: ${assetsReady}")
+        logger.quiet("  Warnings: ${warnings.size()}")
+        if (warnings) {
+            warnings.each { logger.quiet("    - ${it}") }
+        }
+        logger.quiet("  Download dir: ${termdebDownloadsDir.absolutePath}")
+        logger.quiet("  APK assets:   ${termdebApkAssetsDir.absolutePath}")
+        logger.quiet("========================================\n")
+
+        if (warnings && !warnings.isEmpty()) {
+            logger.warn("\n  NOTE: Some optional assets could not be prepared.")
+            logger.warn("  The APK will build but may be missing offline Debian/Box64 support.\n")
+        }
+    }
+}
+
+/**
+ * Create the cleanTermDebAssets task
+ */    task provisionDebianRootfs {
+    description = 'Pre-installs systemd, dbus, ca-certificates, locales into the Debian trixie rootfs using Docker+QEMU (requires Docker with ARM64 QEMU support)'
+    group = 'TermDeb'
+    dependsOn prepareTermDebAssets
+
+    doLast {
+        logger.quiet("\n========================================")
+        logger.quiet("    Pre-provisioning Debian Rootfs")
+        logger.quiet("========================================\n")
+        logger.quiet("This task has already run as part of prepareTermDebAssets when")
+        logger.quiet("-PprovisionRootfs=true was passed. To re-run provisioning:")
+        logger.quiet("  ./gradlew prepareTermDebAssets -PprovisionRootfs=true\n")
+        logger.quiet("To build WITHOUT pre-provisioning (default):")
+        logger.quiet("  ./gradlew prepareTermDebAssets\n")
+    }
+}
+
+    task cleanTermDebAssets {
+    description = 'Removes all downloaded and prepared TermDeb assets (next build will re-download)'
+    group = 'TermDeb'
+
+    doLast {
+        logger.quiet("\n========================================")
+        logger.quiet("    Cleaning TermDeb Assets")
+        logger.quiet("========================================\n")
+
+        def dirs = [termdebCacheDir, termdebApkAssetsDir]
+        dirs.each { dir ->
+            if (dir.exists()) {
+                logger.quiet("  Removing: ${dir.absolutePath}")
+                dir.deleteDir()
+            }
+        }
+
+        logger.quiet("\n  WARNING: The next build will need to download/rebuild all assets.")
+        logger.quiet("  If you need to build offline, do NOT clean the assets.\n")
+        logger.quiet("========================================\n")
+    }
+}
+
+/**
+ * Print build summary
+ */
+task termdebBuildSummary {
+    description = 'Prints a summary of the TermDeb build configuration'
+    group = 'TermDeb'
+
+    doLast {
+        def bootstrapReady = new File(termdebApkAssetsDir, "bootstrap/aarch64.zip").exists()
+        def debianReady = new File(termdebApkAssetsDir, "debian/debian-trixie-arm64.tar.gz").exists() ||
+                          new File(termdebApkAssetsDir, "debian/debian-trixie-arm64.tar.xz").exists()
+        def box64Ready = new File(termdebApkAssetsDir, "box64/box64").exists()
+        def prootDistroReady = new File(termdebApkAssetsDir, "proot-distro/").exists()
+        def provisionedDebian = false
+        if (debianReady) {
+            // Check if the rootfs contains the provisioned marker
+            def provisionedMarker = new File(termdebApkAssetsDir, "debian/.termdeb-provisioned")
+            provisionedDebian = provisionedMarker.exists()
+        }
+
+        logger.quiet("\n========================================")
+        logger.quiet("        TermDeb Build Summary")
+        logger.quiet("========================================\n")
+        logger.quiet("Application:")
+        logger.quiet("  Name: termdeb")
+        logger.quiet("  Package: com.qali.termdeb\n")
+        logger.quiet("Architecture:")
+        logger.quiet("  Target: ARM64 / AArch64\n")
+        logger.quiet("Offline Runtime:")
+        logger.quiet("  Bootstrap:      ${bootstrapReady ? 'READY' : 'MISSING'}")
+        logger.quiet("  proot-distro:   ${prootDistroReady ? 'READY' : 'MISSING'}")
+        logger.quiet("  Debian trixie:   ${debianReady ? (provisionedDebian ? 'READY (PRE-PROVISIONED)' : 'READY') : 'MISSING'}")
+        logger.quiet("  Provisioned:   ${provisionedDebian ? 'YES (systemd/dbus/certs/locales bundled)' : 'NO (first-launch apt-get)'}")
+        logger.quiet("  Box64:          ${box64Ready ? 'READY (glibc)' : 'MISSING'}")
+        logger.quiet("  x86_64 fallback: ENABLED\n")
+
+        def assetsDir = termdebDownloadsDir
+        def totalSize = 0L
+        if (assetsDir.exists()) {
+            assetsDir.listFiles()?.each { totalSize += it.length() }
+        }
+        logger.quiet("Assets:")
+        logger.quiet("  Cache size: ${totalSize / (1024 * 1024)} MB\n")
+
+        def resolvedManifest = new File(termdebManifestDir, 'resolved-assets.json')
+        if (resolvedManifest.exists()) {
+            def manifest = new JsonSlurper().parse(resolvedManifest)
+            logger.quiet("Last preparation:")
+            logger.quiet("  Timestamp: ${manifest.timestamp}")
+            logger.quiet("  Offline: ${manifest.offline_mode}")
+        }
+
+        logger.quiet("\n========================================\n")
+    }
+}

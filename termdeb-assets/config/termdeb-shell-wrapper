@@ -1,0 +1,94 @@
+#!/bin/bash
+# termdeb-shell-wrapper - Default login shell for TermDeb
+#
+# This is the default shell launched by TermDeb terminal sessions.
+# It automatically enters the Debian ARM64 environment via proot-distro.
+#
+# Architecture:
+#   TermDeb Android app
+#        ↓
+#   TerminalSession (this script as login shell)
+#        ↓
+#   termdeb-debian (proot, Debian ARM64 environment)
+#        ↓
+#   Debian bash shell
+#        ↓
+#   ARM64 ELF → native execution
+#   x86_64 ELF → Box64 transparent execution
+#
+# termdeb-debian is RUN (not exec'd) so that when the proot session ends the
+# wrapper can act on it:
+#   - 'termdeb-host' from inside Debian writes ~/.termdeb-host → drop into the
+#     native TermDeb host shell.
+#   - 'termdeb-storage' from inside Debian writes ~/.termdeb-storage → run the
+#     host termdeb-storage (shows the Android storage permission dialog) and
+#     drop into the native TermDeb host shell.
+#   - a plain 'exit' from Debian still closes the session.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+# If bash was invoked with -c (command execution), just run it directly
+# This handles cases like TermDeb executing scripts
+if [ "$1" = "-c" ] || [ "$#" -gt 0 ]; then
+    exec /bin/bash "$@"
+fi
+
+# Set the TERMDEB_DEFAULT_SESSION flag
+export TERMDEB_DEFAULT_SESSION="debian"
+export TERMDEB_HOST_SHELL="${PREFIX:-/data/data/com.qali.termdeb/files/usr}/bin/bash"
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+
+# Shell startup: source the user's ~/.bashrc so aliases/functions/exports
+# are applied every session. A login shell alone reads ~/.profile, not
+# ~/.bashrc - so, mirroring Debian's default, create a ~/.profile that
+# sources it (only if the user has no .profile/.bash_profile of their own).
+if [ -f "${TERMDEB_HOME}/.bashrc" ] && \
+   [ ! -f "${TERMDEB_HOME}/.profile" ] && \
+   [ ! -f "${TERMDEB_HOME}/.bash_profile" ]; then
+    cat > "${TERMDEB_HOME}/.profile" <<'TERMDEB_PROFILE_EOF'
+# ~/.profile: executed by login shells. Source ~/.bashrc (Debian default).
+if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+TERMDEB_PROFILE_EOF
+fi
+
+# Check if the termdeb-debian entry point exists and is executable
+TERMDEB_DEBIAN="${TERMDEB_PREFIX}/bin/termdeb-debian"
+if [ -x "${TERMDEB_DEBIAN}" ]; then
+    # Run it, not exec: act on how the Debian session ended.
+    "${TERMDEB_DEBIAN}"
+    status="$?"
+
+    # termdeb-storage was requested from inside Debian: run it now (shows the
+    # storage permission dialog) and then drop into the native shell.
+    if [ -f "${TERMDEB_HOME}/.termdeb-storage" ]; then
+        rm -f "${TERMDEB_HOME}/.termdeb-storage"
+        if [ -x "${TERMDEB_PREFIX}/bin/termdeb-storage" ]; then
+            "${TERMDEB_PREFIX}/bin/termdeb-storage"
+        fi
+        exec "${TERMDEB_PREFIX}/bin/bash" --login
+    fi
+
+    # termdeb-host was requested from inside Debian: drop into native shell.
+    if [ -f "${TERMDEB_HOME}/.termdeb-host" ]; then
+        rm -f "${TERMDEB_HOME}/.termdeb-host"
+        exec "${TERMDEB_PREFIX}/bin/bash" --login
+    fi
+
+    # Plain 'exit' from Debian: close the session like before.
+    exit "$status"
+fi
+
+# Fallback: try proot-distro directly
+PROOT_DISTRO="${TERMDEB_PREFIX}/bin/proot-distro"
+if [ -x "${PROOT_DISTRO}" ]; then
+    exec "${PROOT_DISTRO}" login debian
+fi
+
+# Last resort: drop to native shell
+echo "TermDeb: Debian entry point not found, starting native shell."
+exec "${TERMDEB_PREFIX}/bin/bash" --login

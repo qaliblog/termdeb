@@ -1,0 +1,81 @@
+{
+  "termdeb_version": "0.1.0",
+  "termdeb_environment_version": "1",
+  "components": {
+    "bootstrap": {
+      "version": "2026.02.12-r1+apt.android-7",
+      "variant": "apt-android-7",
+      "package_manager": "apt"
+    },
+    "proot": {
+      "version": "5.1.107.91",
+      "source": "termux-packages",
+      "bundled": true
+    },
+    "proot-distro": {
+      "version": "5.7.0",
+      "source": "termux/proot-distro"
+    },
+    "debian": {
+      "version": "13 (trixie)",
+      "codename": "trixie",
+      "variant": "base-rootfs",
+      "architecture": "arm64"
+    },
+    "box64": {
+      "version": "0.4.5-local-patched (MAP_FIXED for fixed-address ELFs)",
+      "source": "ptitSeb/box64 (local build, see prebuilt/box64/build-box64.sh)",
+      "target_architecture": "aarch64",
+      "emulates": "x86_64",
+      "patch": "box64-mapfixed.patch"
+    },
+    "box64-libs": {
+      "version": "libc6 2.39-0ubuntu8.8 + gcc-14 14.2.0-4ubuntu2~24.04.1 + zlib1g 1.3.dfsg-3.1ubuntu2.1",
+      "source": "archive.ubuntu.com (amd64, independent of the ARM64 guest distro)",
+      "description": "x86_64 glibc runtime libraries for dynamically-linked x86_64 binaries under box64",
+      "bundled": true
+    },
+    "box64-layer": {
+      "version": "2.1.0",
+      "source": "local (prebuilt/box64/termdeb-x86_64-launcher.c + config/termdeb-wrap64 + prebuilt/box64/termdeb-wrapd.c)",
+      "description": "Transparent Box64 execution layer: termdeb-wrap64 replaces each x86_64 ELF executable with an ARM64 launcher (termdeb-x86_64-launcher) that runs it through box64. Works for every exec path (execve, execvp, posix_spawn, JDK jspawnhelper) with no LD_PRELOAD, and never touches native ARM64 binaries or shared libraries (only ET_EXEC / PIE-with-interpreter ELFs are wrapped). termdeb-wrapd (continuous inotify watcher, host-side) keeps the layer up to date at runtime - AGP re-extracts x86_64 tools into fresh Gradle transform dirs mid-build, which a one-shot scan cannot see. Scan freshness uses a sidecar state file in the app's own data dir: the layer never writes stamps or other files into user/project directories, so tools that consume whole directories (aapt2 link, resource parsing) are never disturbed",
+      "bundled": true
+    },
+    "box86": {
+      "version": "0.3.6",
+      "source": "ptitSeb/box86",
+      "target_architecture": "arm",
+      "emulates": "x86",
+      "optional": true
+    },
+    "systemd": {
+      "version": "255.4 (installed by termdeb-provision on first start)",
+      "source": "deb.debian.org via apt inside the guest",
+      "description": "Complete Debian userspace: termdeb-provision installs systemd, dbus, ca-certificates and locales on first start",
+      "mode": "native (real chroot + systemd as PID 1) when the device has root (su) and the kernel exposes cgroups + PID namespaces; otherwise proot fallback with diagnostics"
+    },
+    "runtime-mode": {
+      "version": "1.0.0",
+      "source": "local",
+      "description": "termdeb-native (chroot/systemd launcher), termdeb-syscheck (kernel diagnostics), termdeb-provision (apt provisioning); merged /usr + full filesystem layout at install time"
+    }
+  },
+  "update_policy": {
+    "protect_user_data": true,
+    "protect_user_packages": true,
+    "update_only_changed": true,
+    "backup_before_update": true
+  },    "offline": {
+      "required_for_first_run": [
+        "bootstrap",
+        "proot",
+        "debian",
+        "box64",
+        "box64-libs",
+        "box64-layer"
+      ],
+    "optional": [
+      "box86"
+    ]
+  }
+}
