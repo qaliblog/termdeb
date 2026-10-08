@@ -94,16 +94,21 @@ def resolveAptPoolDeb(String poolDirUrl, String pkgName, String arch) {
     try {
         String base = poolDirUrl.endsWith('/') ? poolDirUrl : poolDirUrl + '/'
         String listing = new URL(base).getText('UTF-8')
-        def href = java.util.regex.Pattern.compile('(?i)href="([^"]+\.deb)"')
-        def prefer = java.util.regex.Pattern.compile('(?i)^' + java.util.regex.Pattern.quote(pkgName) +
-            '_.+_' + java.util.regex.Pattern.quote(arch) + '\.deb$')
+        String prefix = pkgName + '_'
+        String suffix = '_' + arch + '.deb'
         def candidates = []
+        // Plain string scanning (no regex/backslash literals, which the Groovy DSL
+        // parser is picky about): collect every href="<name>_<ver>_<arch>.deb".
         listing.eachLine { line ->
-            def m = href.matcher(line)
-            while (m.find()) {
-                def fname = m.group(1)
-                if (prefer.matcher(fname).matches()) {
-                    def ver = fname.substring((pkgName + '_').length(), fname.length() - ('_' + arch + '.deb').length())
+            int i = 0
+            while ((i = line.indexOf('href="', i)) >= 0) {
+                i += 'href="'.length()
+                int j = line.indexOf('"', i)
+                if (j < 0) break
+                String fname = line.substring(i, j)
+                i = j + 1
+                if (fname.startsWith(prefix) && fname.endsWith(suffix)) {
+                    def ver = fname.substring(prefix.length(), fname.length() - suffix.length())
                     candidates << [filename: fname, version: ver, url: base + fname]
                 }
             }
@@ -518,7 +523,7 @@ task prepareTermDebAssets {
                 def srcTalloc = new File(usrDir, 'lib/libtalloc.so.2.4.3')
                 if (!srcTalloc.exists()) {
                     def realTalloc = new File(usrDir, 'lib').listFiles()?.find {
-                        it.isFile() && it.name ==~ /libtalloc\.so\.2\.\d+.*/
+                        it.isFile() && it.name.startsWith('libtalloc.so.2.')
                     }
                     if (realTalloc != null) srcTalloc = realTalloc
                 }
