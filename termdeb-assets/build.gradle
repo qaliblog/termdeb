@@ -623,29 +623,45 @@ task prepareTermDebAssets {
             if (staging.exists()) staging.deleteDir()
             staging.mkdirs()
 
-            def allExtracted = true
+            def failedPackages = []
             box64Libs.packages.each { pkg ->
-                def debFile = new File(termdebDownloadsDir, pkg.filename)
-                if (!downloadAsset("box64libs-" + pkg.name, pkg.url, pkg.sha256, debFile, termdebOffline)) {
-                    allExtracted = false
-                    return
-                }
-                def pkgDir = new File(termdebExtractedDir, 'box64libs-' + pkg.name)
-                if (pkgDir.exists()) pkgDir.deleteDir()
-                pkgDir.mkdirs()
-                // dpkg-deb handles zstd/xz/gz data archives; available on Debian/Ubuntu builders
-                // (including CI's ubuntu-latest).
-                if (!execCommand("Extract " + pkg.name + " .deb",
-                    "sh", "-c", "dpkg-deb -x ${debFile.absolutePath} ${pkgDir.absolutePath}")) {
-                    throw new GradleException("Failed to extract " + pkg.name + " .deb with dpkg-deb")
-                }
-                if (!execCommand("Merge " + pkg.name + " files",
-                    "sh", "-c", "cp -r ${pkgDir.absolutePath}/. ${staging.absolutePath}/")) {
-                    throw new GradleException("Failed to merge " + pkg.name + " files")
+                try {
+                    def debFile = new File(termdebDownloadsDir, pkg.filename)
+                    downloadAsset("box64libs-" + pkg.name, pkg.url, pkg.sha256, debFile, termdebOffline)
+                    def pkgDir = new File(termdebExtractedDir, 'box64libs-' + pkg.name)
+                    if (pkgDir.exists()) pkgDir.deleteDir()
+                    pkgDir.mkdirs()
+                    // dpkg-deb handles zstd/xz/gz data archives; available on Debian/Ubuntu builders
+                    // (including CI's ubuntu-latest).
+                    if (!execCommand("Extract " + pkg.name + " .deb",
+                        "sh", "-c", "dpkg-deb -x ${debFile.absolutePath} ${pkgDir.absolutePath}")) {
+                        throw new GradleException("Failed to extract " + pkg.name + " .deb with dpkg-deb")
+                    }
+                    if (!execCommand("Merge " + pkg.name + " files",
+                        "sh", "-c", "cp -r ${pkgDir.absolutePath}/. ${staging.absolutePath}/")) {
+                        throw new GradleException("Failed to merge " + pkg.name + " files")
+                    }
+                } catch (Exception e) {
+                    // A single stale .deb URL (Ubuntu rolls point releases, so a pinned
+                    // URL 404s) or an unavailable package must not drop the whole
+                    // x86_64 runtime. Warn, continue, and require the core libc before
+                    // packing the archive below.
+                    logger.warn("  [box64-libs] Skipping '" + pkg.name + "': " + e.message)
+                    warnings << ("box64-libs " + pkg.name + ": " + e.message)
+                    failedPackages << pkg.name
                 }
             }
 
-            if (allExtracted) {
+            def libcPresent = new File(staging, 'usr/lib/x86_64-linux-gnu/libc.so.6').exists()
+            if (!libcPresent) {
+                logger.warn("  [box64-libs] Core libc.so.6 missing - cannot build the x86_64 runtime")
+                warnings << "box64-libs: core libc.so.6 missing"
+            } else if (failedPackages) {
+                logger.warn("  [box64-libs] Built with " + failedPackages.size() +
+                    " package(s) skipped: " + failedPackages.join(", "))
+            }
+
+            if (libcPresent) {
                 def ldSrc = new File(staging, 'usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2')
                 if (ldSrc.exists()) {
                     // Real file, not a symlink: assets cannot carry symlinks reliably.
