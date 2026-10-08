@@ -53,7 +53,7 @@ jobs:
           fi
 
       - name: Cache TermDeb assets
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             build/termdeb-assets
