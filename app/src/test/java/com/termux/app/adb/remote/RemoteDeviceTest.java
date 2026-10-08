@@ -189,8 +189,8 @@ public class RemoteDeviceTest {
                 AdbKeyPair.ANDROID_PUBKEY_ENCODED_SIZE, struct.length);
             assertEquals("payload must end with exactly one NUL",
                 (byte) 0, pub.payload[pub.payload.length - 1]);
-            assertEquals("no trailing space after userhost",
-                'x', pub.payload[pub.payload.length - 2]);
+            assertEquals("last byte before NUL must be the userhost's final char, not a space",
+                'b', pub.payload[pub.payload.length - 2]);
             // Never accept: leave the client unauthorized.
             return "hold";
         };
