@@ -22,7 +22,6 @@ TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
 TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
 TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
 PROOT="${TERMDEB_PREFIX}/bin/proot"
-PROOT_DISTRO="${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py"
 BOX64="${TERMDEB_PREFIX}/bin/box64"
 
 # Already inside the Debian guest (proot or native chroot)? Run a shell.
@@ -149,37 +148,25 @@ fi
 TERMDEB_PROFILE_EOF
 fi
 
-# Prefer proot-distro when available: it launches distributions without a
-# standalone proot binary, which is more reliable on modern Android (the
-# standalone pre-PTTLS proot can fail on Android 11+ when $PREFIX/tmp is
-# not writable, yielding a cryptic "/bin/bash: No such file or directory").
-# Falling back to proot only when proot-distro is absent.
-if [ -x "${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py" ]; then
-  echo "TermDeb: launching Debian via proot-distro..."
-  exec /data/data/com.qali.termdeb/files/usr/bin/python3 \
-    "${TERMDEB_PREFIX}/share/proot-distro/proot-distro.py" login debian \
-    --image "${TERMDEB_UROOT}" \
-    --broker /data/data/com.qali.termdeb/files/usr/bin/proot-distro-broker \
-    -- /bin/bash --login
-fi
-
-# Fall back to standalone proot if proot-distro is not available.
+# Launch Debian with the bundled proot binary (no root required). proot-distro
+# is also bundled, but it is a Python program and the Termux bootstrap ships no
+# python3, so it cannot be used here - proot is the launch path.
 # The upstream Termux proot launch script can fail on non-TMUX installs when
 # $PREFIX/tmp is not writable (Android 11+ can restrict access to /data/data/com.termux
 # paths), yielding a cryptic "/bin/bash: No such file or directory" (exit 127).
 # If proot is missing or unusable, show a clear error and drop to the native shell.
 if [ ! -x "${PROOT}" ]; then
   echo "TermDeb: proot binary not found at ${PROOT}"
-  echo "TermDeb: The TermDeb app may not be installed correctly."
-  echo "TermDeb: Try reinstalling the app or running 'termux-reload-settings'."
-  echo "TermDeb: Falling back to native TermDeb shell."
+  echo "TermDeb: The Debian environment cannot start without it."
+  echo "TermDeb: Reinstall TermDeb, or run 'termdeb-syscheck' for diagnostics."
+  echo "TermDeb: Falling back to the native TermDeb shell (Debian features unavailable)."
   exec "${TERMDEB_PREFIX}/bin/bash" --login
 fi
 
-# Check if proot actually works (some Android versions block it)
+# Check if proot actually runs (some Android versions block it)
 if ! "${PROOT}" --help >/dev/null 2>&1; then
-  echo "TermDeb: proot at ${PROOT} is not working (possibly blocked by Android)."
-  echo "TermDeb: Falling back to native TermDeb shell."
+  echo "TermDeb: proot at ${PROOT} is present but not runnable (blocked by Android?)."
+  echo "TermDeb: Falling back to the native TermDeb shell (Debian features unavailable)."
   exec "${TERMDEB_PREFIX}/bin/bash" --login
 fi
 

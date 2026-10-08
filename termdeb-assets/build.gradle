@@ -62,6 +62,62 @@ def calculateSha256(File file) {
 }
 
 /**
+ * Compare two package version strings numerically per dot-separated component,
+ * so "5.1.107.96" sorts after "5.1.107.92" (a plain string compare would not).
+ */
+def compareDebVersion(String a, String b) {
+    def part = { String s -> try { return Long.parseLong(s) } catch (NumberFormatException ignored) { return s } }
+    def pa = a.tokenize('.').collect { part(it) }
+    def pb = b.tokenize('.').collect { part(it) }
+    int n = Math.max(pa.size(), pb.size())
+    for (int i = 0; i < n; i++) {
+        def xa = i < pa.size() ? pa[i] : 0L
+        def xb = i < pb.size() ? pb[i] : 0L
+        if (xa instanceof Number && xb instanceof Number) {
+            if (xa != xb) return xa <=> xb
+        } else {
+            int c = xa.toString() <=> xb.toString()
+            if (c != 0) return c
+        }
+    }
+    return 0
+}
+
+/**
+ * Resolve the newest "<name>_<version>_<arch>.deb" from a Termux apt pool
+ * directory listing. The Termux apt pool is rolling: a pinned filename 404s as
+ * soon as upstream bumps the package version, which silently dropped the proot
+ * asset from the APK. Returns [filename, version, url] or null when the
+ * directory cannot be listed.
+ */
+def resolveAptPoolDeb(String poolDirUrl, String pkgName, String arch) {
+    try {
+        String base = poolDirUrl.endsWith('/') ? poolDirUrl : poolDirUrl + '/'
+        String listing = new URL(base).getText('UTF-8')
+        def href = java.util.regex.Pattern.compile('(?i)href="([^"]+\.deb)"')
+        def prefer = java.util.regex.Pattern.compile('(?i)^' + java.util.regex.Pattern.quote(pkgName) +
+            '_.+_' + java.util.regex.Pattern.quote(arch) + '\.deb$')
+        def candidates = []
+        listing.eachLine { line ->
+            def m = href.matcher(line)
+            while (m.find()) {
+                def fname = m.group(1)
+                if (prefer.matcher(fname).matches()) {
+                    def ver = fname.substring((pkgName + '_').length(), fname.length() - ('_' + arch + '.deb').length())
+                    candidates << [filename: fname, version: ver, url: base + fname]
+                }
+            }
+        }
+        if (candidates.isEmpty()) return null
+        candidates.sort { x, y -> compareDebVersion(x.version, y.version) }
+        return candidates.last()
+    } catch (Exception e) {
+        logger.quiet("  [pool] Could not list ${poolDirUrl}: ${e.message}")
+        return null
+    }
+}
+
+/**
  * Download a file with optional SHA-256 verification and idempotent caching
  */
 def downloadAsset(String name, String url, String expectedSha256, File destFile, boolean offline) {
@@ -346,10 +402,34 @@ task prepareTermDebAssets {
             prootStaging.mkdirs()
 
             def allExtracted = true
+            def prootFailed = []
             proot.packages.each { pkg ->
-                def debFile = new File(termdebDownloadsDir, pkg.filename)
-                if (!downloadAsset("proot-" + pkg.name, pkg.url, pkg.sha256, debFile, termdebOffline)) {
+                // The apt pool is rolling (see the manifest notes): prefer resolving the
+                // newest <name>_<version>_<arch>.deb from the pool_dir over the pinned
+                // filename, so an upstream version bump cannot silently drop proot from
+                // the APK the way it did before.
+                def arch = pkg.arch ?: 'aarch64'
+                def resolved = pkg.pool_dir ? resolveAptPoolDeb(pkg.pool_dir, pkg.name, arch) : null
+                def pkgFilename = resolved ? resolved.filename : pkg.filename
+                def pkgUrl = resolved ? resolved.url : pkg.url
+                // Only verify the pinned sha256 when we download exactly the pinned file;
+                // a dynamically resolved (newer) file has no known hash here.
+                def pinnedBasename = pkg.filename ? new File(pkg.filename).name : null
+                def pkgSha = (resolved == null || pkgFilename == pinnedBasename) ? pkg.sha256 : null
+                if (resolved) {
+                    logger.quiet("  [proot-${pkg.name}] resolved newest from pool: ${pkgFilename}")
+                }
+                def debFile = new File(termdebDownloadsDir, pkgFilename)
+                try {
+                    if (!downloadAsset("proot-" + pkg.name, pkgUrl, pkgSha, debFile, termdebOffline)) {
+                        allExtracted = false
+                        prootFailed << pkg.name
+                        return
+                    }
+                } catch (Exception e) {
+                    logger.warn("  [proot-${pkg.name}] download failed: ${e.message}")
                     allExtracted = false
+                    prootFailed << pkg.name
                     return
                 }
 
@@ -381,6 +461,15 @@ task prepareTermDebAssets {
                     "sh", "-c", "cp -r ${dataDir.absolutePath}/. ${prootStaging.absolutePath}/")) {
                     throw new GradleException("Failed to merge " + pkg.name + " files")
                 }
+            }
+
+            if (!allExtracted) {
+                // proot is REQUIRED for the offline Debian runtime: the generated
+                // termdeb-debian script execs $PREFIX/bin/proot directly, and the Termux
+                // bootstrap does NOT ship proot. Shipping without it produces an APK
+                // whose terminal cannot start Debian at all.
+                throw new GradleException("proot is REQUIRED but could not be prepared (failed packages: " +
+                    prootFailed.join(", ") + ")")
             }
 
             if (allExtracted) {
@@ -422,18 +511,33 @@ task prepareTermDebAssets {
                     java.nio.file.Files.copy(srcShmem.toPath(), new File(destLibDir, 'libandroid-shmem.so').toPath(),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                 }
+                // libtalloc's real file is version-suffixed (libtalloc.so.2.5.0); the
+                // libtalloc.so and libtalloc.so.2 entries are symlinks, which assets
+                // cannot carry reliably, so locate the real file and store it under the
+                // SONAME the proot binary links against (libtalloc.so.2).
                 def srcTalloc = new File(usrDir, 'lib/libtalloc.so.2.4.3')
+                if (!srcTalloc.exists()) {
+                    def realTalloc = new File(usrDir, 'lib').listFiles()?.find {
+                        it.isFile() && it.name ==~ /libtalloc\.so\.2\.\d+.*/
+                    }
+                    if (realTalloc != null) srcTalloc = realTalloc
+                }
                 if (srcTalloc.exists()) {
                     java.nio.file.Files.copy(srcTalloc.toPath(), new File(destLibDir, 'libtalloc.so.2').toPath(),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } else {
+                    throw new GradleException("libtalloc real library not found in extracted .deb (expected lib/libtalloc.so.2.*)")
                 }
 
                 logger.quiet("  [proot] READY (v${proot.version}, ${destProot.length()} bytes)")
                 assetsReady++
             }
         } catch (Exception e) {
-            logger.warn("  [proot] Warning: ${e.message}")
-            warnings << "proot: ${e.message}"
+            // proot is REQUIRED (manifest required_for_offline=true and the launch
+            // scripts exec it directly). Fail the build instead of silently shipping an
+            // APK that cannot start Debian - that is exactly how the missing-proot APK
+            // reached users before.
+            throw new GradleException("proot preparation FAILED (required for the TermDeb offline runtime): ${e.message}", e)
         }
 
         // ========================================

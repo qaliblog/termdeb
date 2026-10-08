@@ -92,6 +92,7 @@ jobs:
           echo ""
           echo "Assets:"
           echo "  - proot-distro: downloading from GitHub"
+          echo "  - proot: Termux proot binary + runtime libs (required for the Debian launch)"
           echo "  - Debian 13 (trixie): downloading official Debian trixie rootfs"
           echo "  - Debian 13 (trixie): PRE-PROVISIONING (systemd, dbus, ca-certificates, locales)"
           echo "  - Box64: committed patched ARM64 binary; transparent layer built from source with the NDK"
@@ -149,12 +150,15 @@ jobs:
             ERRORS=$((ERRORS + 1))
           fi
 
-          # Check proot (OPTIONAL - not needed if using bootstrap's built-in proot)
-          # proot is included in Termux bootstrap, so this check is informational
+          # Check proot (REQUIRED). The Termux bootstrap ships NO proot, and the generated
+          # termdeb-debian script execs $PREFIX/bin/proot to launch Debian, so a missing
+          # proot produces an APK whose terminal cannot start Debian at all. This check is
+          # what catches a stale/404 package URL instead of silently shipping a broken APK.
           if [ -f "$ASSETS_DIR/proot/bin/proot" ] && [ -f "$ASSETS_DIR/proot/lib/libandroid-shmem.so" ] && [ -f "$ASSETS_DIR/proot/lib/libtalloc.so.2" ]; then
             echo "  proot:         PASS ($(file $ASSETS_DIR/proot/bin/proot 2>/dev/null | grep -o 'ELF 64-bit.*' | head -1))"
           else
-            echo "  proot:         SKIP (optional - Termux bootstrap includes proot)"
+            echo "  proot:         FAIL (missing - Debian cannot start without the bundled proot)"
+            ERRORS=$((ERRORS + 1))
           fi
 
           # Check Box64
