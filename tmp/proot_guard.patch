@@ -1,0 +1,24 @@
+*** Begin Patch
+*** Update File: termdeb-assets/config/termdeb-debian
+@@ -147,6 +147,13 @@
+ # Launch Debian via proot (no root required): complete Linux userspace with
+ # /proc, /sys, /dev, /dev/pts, tmpfs-style /dev/shm, /run, /sdcard, storage,
+ # DNS and Box64 all bound in. x86_64 binaries are routed through box64 by
+@@ -153,6 +153,9 @@
+   --link2symlink --kill-on-exit --root-id --cwd=/root \
+   -b /dev -b /proc -b /sys \
+   -b "${TERMDEB_HOME}:/root" \
+   -b "${TERMDEB_HOME}/storage:/mnt/storage" \
+   -b "/storage/emulated/0:/sdcard" \
+   -b "${TERMDEB_PREFIX}/tmp:/tmp" \
+   -b "${TERMDEB_PREFIX}/tmp/shm:/dev/shm" \
+   -b "${BOX64}:/usr/local/bin/box64" \
+   -b "${TERMDEB_PREFIX}/etc/resolv.conf:/etc/resolv.conf" \
+   -r "${TERMDEB_UROOT}" \
+   /usr/bin/env -i \
+   HOME=/root USER=root TERM="${TERM:-xterm-256color}" \
+   LANG=en_US.UTF-8 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+   BOX64_LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:/usr/lib/x86_64-linux-gnu:/lib64:/usr/lib64 \
+   BOX64_DYNAREC=1 BOX64_DYNAREC_BIGBLOCK=1 BOX64_DYNAREC_SAFEFLAGS=1 \
+   /bin/bash --login
+*** End Patch

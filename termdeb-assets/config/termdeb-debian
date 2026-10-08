@@ -144,6 +144,15 @@ fi
 TERMDEB_PROFILE_EOF
 fi
 
+# The upstream Termux proot launch script can fail on non-TMUX installs when
+# $PREFIX/tmp is not writable (Android 11+ can restrict access to /data/data/com.termux
+# paths), yielding a cryptic "/bin/bash: No such file or directory" (exit 127).
+# If proot is missing or unusable, drop to the native TermDeb shell with a message.
+if [ ! -x "${PROOT}" ] || ! "${PROOT}" --help >/dev/null 2>&1; then
+  echo "TermDeb: proot not usable at ${PROOT} - falling back to native TermDeb shell."
+  exec "${TERMDEB_PREFIX}/bin/bash" --login
+fi
+
 # Launch Debian via proot (no root required): complete Linux userspace with
 # /proc, /sys, /dev, /dev/pts, tmpfs-style /dev/shm, /run, /sdcard, storage,
 # DNS and Box64 all bound in. x86_64 binaries are routed through box64 by
