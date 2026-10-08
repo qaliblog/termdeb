@@ -2011,9 +2011,9 @@ final class TermuxInstaller {
             "  # shellcheck disable=SC2086  # intentional word-splitting of SDK root list\n" +
             "  nohup \"${TERMDEB_PREFIX}/bin/termdeb-wrapd\" ${TERMDEB_SDK_ROOTS} \\\n" +
             "    >\"${TERMDEB_PREFIX}/tmp/termdeb-wrapd.log\" 2>&1 &\n" +
-            "  wrapd_pid=\$!\n" +
+            "  wrapd_pid=$!\n" +
             "  # Detach from the watcher: if it dies, don't kill the session.\n" +
-            "  disown \$wrapd_pid 2>/dev/null || true\n" +
+            "  disown $wrapd_pid 2>/dev/null || true\n" +
             "fi\n\n" +
             "# Create bind sources\n" +
             "mkdir -p \"${TERMDEB_HOME}/storage\" \"${TERMDEB_PREFIX}/tmp\" \"${TERMDEB_PREFIX}/tmp/shm\"\n" +
