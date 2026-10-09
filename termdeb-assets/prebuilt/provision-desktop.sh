@@ -68,7 +68,10 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 SCREENCCOPY_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-screencopy-unstable-v1.xml"
 VIRTUAL_POINTER_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-virtual-pointer-unstable-v1.xml"
-VIRTUAL_KEYBOARD_XML="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/main/unstable/virtual-keyboard/virtual-keyboard-unstable-v1.xml"
+# virtual-keyboard-unstable-v1 is NOT shipped by wayland-protocols (verified
+# across tags 1.31..1.49 and main); it is maintained by wlroots. The old
+# wayland-protocols URL 404s and aborted provisioning.
+VIRTUAL_KEYBOARD_XML="https://raw.githubusercontent.com/swaywm/wlroots/master/protocol/virtual-keyboard-unstable-v1.xml"
 
 # Do not start services during package installation under this chroot.
 if [ ! -e /usr/sbin/policy-rc.d ]; then
@@ -126,8 +129,9 @@ cd /tmp/bridge
 curl -fsSL "${SCREENCCOPY_XML}" -o wlr-screencopy-unstable-v1.xml
 curl -fsSL "${VIRTUAL_POINTER_XML}" -o wlr-virtual-pointer-unstable-v1.xml
 
-# virtual-keyboard-unstable-v1 is shipped by the Debian wayland-protocols
-# package; prefer the on-disk copy and only download if it is absent.
+# virtual-keyboard-unstable-v1 is not shipped by Debian's wayland-protocols
+# package; prefer an on-disk copy if one ever appears and otherwise download
+# the wlroots-maintained definition.
 VK_XML="$(find /usr/share/wayland-protocols -name 'virtual-keyboard-unstable-v1.xml' 2>/dev/null | head -1)"
 if [ -n "${VK_XML}" ] && [ -f "${VK_XML}" ]; then
   echo "  [build] Using packaged virtual-keyboard protocol: ${VK_XML}"
