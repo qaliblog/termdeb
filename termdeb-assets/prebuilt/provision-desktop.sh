@@ -146,6 +146,12 @@ if ! apt-get install -y --no-install-recommends libxml2-dev >/dev/null 2>&1; the
   echo "  [build] ERROR: failed to install libxml2-dev" >&2
   exit 1
 fi
+# scanner.c uses the expat API directly (#include <expat.h>); install libexpat-dev so
+# the compiler can find expat.h and link against libexpat.
+if ! apt-get install -y --no-install-recommends libexpat-dev >/dev/null 2>&1; then
+  echo "  [build] ERROR: failed to install libexpat-dev" >&2
+  exit 1
+fi
 SCAN_CD="$(cd "${WS_SRC_DIR}" && pwd)"
 cc -O2 -pipe -o /usr/local/bin/wayland-scanner \
   "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE -lexpat
