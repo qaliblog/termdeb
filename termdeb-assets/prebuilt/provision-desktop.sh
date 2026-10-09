@@ -154,7 +154,7 @@ if ! apt-get install -y --no-install-recommends libexpat-dev >/dev/null 2>&1; th
 fi
 SCAN_CD="$(cd "${WS_SRC_DIR}" && pwd)"
 cc -O2 -pipe -o /usr/local/bin/wayland-scanner \
-  "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE -lexpat
+  "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE -lexpat -lwayland-util
 if [ ! -x /usr/local/bin/wayland-scanner ]; then
   echo "  [build] ERROR: wayland-scanner build failed" >&2
   exit 1
