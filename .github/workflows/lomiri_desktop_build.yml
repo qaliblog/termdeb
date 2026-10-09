@@ -1,0 +1,261 @@
+name: Build (Lomiri Desktop)
+
+# Dedicated workflow for the TermDeb Lomiri desktop APK.
+#
+# This workflow is deliberately separate from .github/workflows/debug_build.yml:
+# it produces a DIFFERENT APK variant that bundles a Debian trixie rootfs with
+# the Lomiri desktop, the Mir compositor and the TermDeb Mir display bridge
+# installed for ARM64. The existing terminal build and workflow remain untouched.
+#
+# Display architecture (no VNC / remote desktop):
+#   * Lomiri runs inside the packaged Debian trixie guest and uses Mir as the
+#     compositor on an offscreen "virtual" output rendered in software;
+#   * termdeb-mir-bridge captures Mir's output with the Wayland wlr-screencopy
+#     protocol and writes it to a shared, memory-mapped framebuffer that the
+#     Android app maps and presents on its surface;
+#   * the existing Termux mini-keyboard (unchanged, pinned to the bottom of the
+#     screen) and touch gestures feed input back to Mir through the Wayland
+#     virtual keyboard/pointer protocols.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'lomiri-desktop/**'
+  pull_request:
+    branches:
+      - master
+      - 'lomiri-desktop/**'
+    paths:
+      - 'app/src/main/**'
+      - 'termdeb-assets/**'
+      - '.github/workflows/lomiri_desktop_build.yml'
+
+jobs:
+  build-lomiri-desktop:
+    name: Lomiri desktop release (ARM64)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package_variant: [ apt-android-7 ]
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v6
+
+      - name: Setup java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Ensure Android NDK (guest adb client + Box64 layer)
+        shell: bash {0}
+        run: |
+          if ls "$ANDROID_HOME"/ndk/*/ndk-build >/dev/null 2>&1; then
+            echo "NDK already installed: $(ls -1d "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)"
+          else
+            echo "No NDK found; installing ndk;27.0.12077973"
+            yes | "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager --licenses >/dev/null 2>&1 || true
+            "$ANDROID_HOME"/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" >/tmp/sdkmanager-ndk.log 2>&1 || {
+              echo "sdkmanager NDK install failed:";
+              tail -30 /tmp/sdkmanager-ndk.log;
+              exit 1;
+            }
+            echo "Installed: $(ls -1d "$ANDROID_HOME"/ndk/* | sort -V | tail -n 1)"
+          fi
+
+      - name: Cache TermDeb assets
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/termdeb-assets
+            app/src/main/assets/termdeb-runtime
+          key: termdeb-lomiri-assets-${{ runner.os }}-${{ hashFiles('termdeb-assets/manifest.json') }}
+          restore-keys: |
+            termdeb-lomiri-assets-${{ runner.os }}-
+
+      - name: Setup QEMU for ARM64 emulation
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  QEMU ARM64 Setup (build-time only)"
+          echo "========================================="
+          echo "Used to run the ARM64 apt toolchain that installs/extracts the"
+          echo "Lomiri + Mir payload and compiles the Mir display bridge into the"
+          echo "Debian trixie ARM64 rootfs. The app itself does not use QEMU."
+          echo ""
+          if ! docker run --privileged --rm --pull=always tonistiigi/binfmt --install arm64; then
+            echo "ERROR: QEMU ARM64 emulation is required for the Lomiri desktop build." >&2
+            exit 1
+          fi
+
+      - name: Prepare base TermDeb assets (provisioned Debian trixie ARM64)
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  Preparing base TermDeb assets"
+          echo "========================================="
+          ./gradlew prepareTermDebAssets -PprovisionRootfs=true --info || {
+            echo "WARNING: prepareTermDebAssets reported an issue; inspecting artifacts..."
+          }
+
+          ASSETS_DIR="app/src/main/assets/termdeb-runtime"
+          DEBIAN_TAR=$(ls $ASSETS_DIR/debian/debian-trixie-arm64.tar.* 2>/dev/null | head -1)
+          if [ -z "$DEBIAN_TAR" ]; then
+            echo "ERROR: Debian rootfs asset not produced; cannot continue." >&2
+            exit 1
+          fi
+          echo "Base Debian rootfs: $DEBIAN_TAR"
+
+      - name: Provision Lomiri + Mir into the ARM64 rootfs
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  Installing Lomiri + Mir (ARM64)"
+          echo "========================================="
+          set -e
+          ASSETS_DIR="app/src/main/assets/termdeb-runtime"
+          DEBIAN_TAR=$(ls $ASSETS_DIR/debian/debian-trixie-arm64.tar.* 2>/dev/null | head -1)
+
+          STAGE_DIR="$(mktemp -d /tmp/termdeb-lomiri-rootfs-XXXXXX)"
+          echo "Extracting $DEBIAN_TAR -> $STAGE_DIR"
+          tar -xzf "$DEBIAN_TAR" -C "$STAGE_DIR"
+
+          bash termdeb-assets/prebuilt/provision-desktop.sh "$STAGE_DIR" termdeb-assets/prebuilt/mir-bridge
+
+          echo "Re-packing the desktop-provisioned rootfs..."
+          rm -f "$DEBIAN_TAR"
+          tar -czf "$DEBIAN_TAR" --warning=failed-read -C "$STAGE_DIR" .
+          rm -rf "$STAGE_DIR"
+
+          echo "Desktop rootfs: $DEBIAN_TAR ($(du -h "$DEBIAN_TAR" | cut -f1))"
+
+      - name: Stage Lomiri desktop overlay
+        shell: bash {0}
+        run: |
+          ./gradlew prepareTermDebDesktopAssets --info
+
+      - name: Verify Lomiri desktop assets
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  Lomiri desktop asset verification"
+          echo "========================================="
+          ASSETS_DIR="app/src/main/assets/termdeb-runtime"
+          DESKTOP_DIR="app/src/main/assets/termdeb-desktop"
+          ERRORS=0
+
+          # Base runtime assets must still be present (preserve existing functionality).
+          for CHECK in \
+            "proot/bin/proot" \
+            "proot/lib/libandroid-shmem.so" \
+            "proot/lib/libtalloc.so.2" \
+            "box64/box64"; do
+            if [ -f "$ASSETS_DIR/$CHECK" ]; then
+              echo "  base/$CHECK: PASS"
+            else
+              echo "  base/$CHECK: FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          # The desktop overlay scripts.
+          for CHECK in \
+            "host/termdeb-desktop" \
+            "guest/termdeb-desktop-session" \
+            "termdeb-desktop-version.json"; do
+            if [ -f "$DESKTOP_DIR/$CHECK" ]; then
+              echo "  desktop/$CHECK: PASS"
+            else
+              echo "  desktop/$CHECK: FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          # Lomiri/Mir + the compiled bridge must be inside the rootfs.
+          DEBIAN_TAR=$(ls $ASSETS_DIR/debian/debian-trixie-arm64.tar.* 2>/dev/null | head -1)
+          if [ -n "$DEBIAN_TAR" ]; then
+            echo "  Inspecting rootfs: $DEBIAN_TAR"
+            ROOTFS_LIST=$(tar -tzf "$DEBIAN_TAR" 2>/dev/null)
+            if echo "$ROOTFS_LIST" | grep -q "usr/local/bin/termdeb-mir-bridge"; then
+              echo "  rootfs termdeb-mir-bridge: PASS"
+            else
+              echo "  rootfs termdeb-mir-bridge: FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+            if echo "$ROOTFS_LIST" | grep -q "etc/termdeb-desktop-provisioned"; then
+              echo "  rootfs desktop marker: PASS"
+            else
+              echo "  rootfs desktop marker: FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+            if echo "$ROOTFS_LIST" | grep -qE "usr/bin/(lomiri|mir_demo_server|miral-shell)"; then
+              echo "  rootfs Lomiri/Mir binaries: PASS"
+            else
+              echo "  rootfs Lomiri/Mir binaries: FAIL (missing)"
+              ERRORS=$((ERRORS + 1))
+            fi
+          else
+            echo "  rootfs: FAIL (no Debian rootfs asset)"
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          if [ $ERRORS -gt 0 ]; then
+            echo "RESULT: FAILED ($ERRORS error(s))"
+            exit 1
+          fi
+          echo "RESULT: ALL LOMIRI DESKTOP ASSETS VERIFIED"
+
+      - name: Build Lomiri desktop release APK
+        shell: bash {0}
+        env:
+          PACKAGE_VARIANT: ${{ matrix.package_variant }}
+        run: |
+          exit_on_error() { echo "$1"; exit 1; }
+
+          if [ "$GITHUB_EVENT_NAME" == "pull_request" ]; then
+              GITHUB_SHA="${{ github.event.pull_request.head.sha }}"
+          fi
+
+          CURRENT_VERSION_NAME_REGEX='\s+versionName "([^"]+)"$'
+          CURRENT_VERSION_NAME="$(grep -m 1 -E "$CURRENT_VERSION_NAME_REGEX" ./app/build.gradle | sed -r "s/$CURRENT_VERSION_NAME_REGEX/\1/")"
+          RELEASE_VERSION_NAME="v$CURRENT_VERSION_NAME+${GITHUB_SHA:0:7}"
+          if ! printf "%s" "${RELEASE_VERSION_NAME/v/}" | grep -qP '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'; then
+           exit_on_error "The versionName '${RELEASE_VERSION_NAME/v/}' is not a valid semver."
+          fi
+
+          APK_DIR_PATH="./app/build/outputs/apk/release"
+          APK_VERSION_TAG="$RELEASE_VERSION_NAME-${{ env.PACKAGE_VARIANT }}-lomiri-desktop-github-release"
+          APK_BASENAME_PREFIX="termdeb_lomiri_$APK_VERSION_TAG"
+
+          echo "APK_DIR_PATH=$APK_DIR_PATH" >> $GITHUB_ENV
+          echo "APK_VERSION_TAG=$APK_VERSION_TAG" >> $GITHUB_ENV
+          echo "APK_BASENAME_PREFIX=$APK_BASENAME_PREFIX" >> $GITHUB_ENV
+
+          echo "Building Lomiri desktop release APKs for '$APK_VERSION_TAG'"
+          export TERMUX_APP_VERSION_NAME="${RELEASE_VERSION_NAME/v/}"
+          export TERMUX_APK_VERSION_TAG="$APK_VERSION_TAG"
+          export TERMUX_PACKAGE_VARIANT="${{ env.PACKAGE_VARIANT }}"
+          export TERMUX_SPLIT_APKS_FOR_RELEASE_BUILDS="0"
+
+          if ! ./gradlew assembleRelease; then
+            exit_on_error "Lomiri desktop release build failed."
+          fi
+
+          echo "Built APKs:"
+          ls -lh "$APK_DIR_PATH"/*.apk 2>/dev/null || exit_on_error "No APKs found in $APK_DIR_PATH"
+
+          echo "Generating sha256sums"
+          (cd "$APK_DIR_PATH" && sha256sum *.apk > "${APK_BASENAME_PREFIX}_sha256sums") || true
+
+      - name: Upload Lomiri desktop APKs
+        uses: actions/upload-artifact@v6
+        with:
+          name: termdeb-lomiri-desktop-${{ env.PACKAGE_VARIANT }}
+          path: |
+            ${{ env.APK_DIR_PATH }}/*.apk
+            ${{ env.APK_DIR_PATH }}/*sha256sums
+            ${{ env.APK_DIR_PATH }}/output-metadata.json
+          if-no-files-found: error

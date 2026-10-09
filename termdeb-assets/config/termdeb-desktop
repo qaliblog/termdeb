@@ -1,0 +1,68 @@
+#!/bin/bash
+# termdeb-desktop - Start the TermDeb Lomiri desktop session
+#
+# Runs on the HOST (the Termux side of TermDeb). It enters the packaged Debian
+# trixie userspace with proot and starts the guest desktop session script
+# (termdeb-desktop-session), which brings up Mir + Lomiri and the display bridge.
+#
+# The Lomiri desktop is rendered from the Mir compositor inside the guest onto the
+# Android app surface through a local memory-mapped framebuffer. No VNC / remote
+# desktop is involved. See docs/lomiri-desktop-architecture.md.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+TERMDEB_PREFIX="${PREFIX:-/data/data/com.qali.termdeb/files/usr}"
+TERMDEB_APP_DIR="${TERMDEB_PREFIX%/files/usr}"
+TERMDEB_HOME="${TERMDEB_APP_DIR}/files/home"
+TERMDEB_UROOT="${TERMDEB_APP_DIR}/files/debian-root"
+TERMDEB_DESKTOP_DIR="${TERMDEB_APP_DIR}/files/termdeb-desktop"
+PROOT="${TERMDEB_PREFIX}/bin/proot"
+BOX64="${TERMDEB_PREFIX}/bin/box64"
+
+log() { echo "TermDeb desktop: $*"; }
+
+# Already inside the guest? Then just run the session script directly.
+if [ -f /etc/os-release ] && [ "$(id -u 2>/dev/null)" = "0" ] && [ -x /usr/local/bin/termdeb-desktop-session ]; then
+  exec /usr/local/bin/termdeb-desktop-session
+fi
+
+if [ ! -d "${TERMDEB_UROOT}" ] || [ ! -f "${TERMDEB_UROOT}/etc/os-release" ]; then
+  log "Debian rootfs not found at ${TERMDEB_UROOT}."
+  log "Reinstall TermDeb, or run 'termdeb-debian' once to initialise the runtime."
+  exit 1
+fi
+
+if [ ! -x "${PROOT}" ]; then
+  log "proot binary not found at ${PROOT}; cannot start the desktop."
+  exit 1
+fi
+
+# The desktop bridge exchanges frames and input through this directory: the Android
+# app creates the shared framebuffer and the input socket here, and this directory is
+# bind-mounted into the guest. Create it eagerly so the guest never races the app.
+mkdir -p "${TERMDEB_DESKTOP_DIR}" \
+         "${TERMDEB_PREFIX}/tmp" \
+         "${TERMDEB_PREFIX}/tmp/shm"
+
+log "Entering Debian trixie and starting the Lomiri desktop session..."
+
+exec "${PROOT}" \
+  --link2symlink --kill-on-exit --root-id --cwd=/root \
+  -b /dev -b /proc -b /sys \
+  -b "${TERMDEB_HOME}:/root" \
+  -b "${TERMDEB_HOME}/storage:/mnt/storage" \
+  -b "/storage/emulated/0:/sdcard" \
+  -b "${TERMDEB_PREFIX}/tmp:/tmp" \
+  -b "${TERMDEB_PREFIX}/tmp/shm:/dev/shm" \
+  -b "${TERMDEB_DESKTOP_DIR}:/run/termdeb" \
+  -b "${BOX64}:/usr/local/bin/box64" \
+  -b "${TERMDEB_PREFIX}/etc/resolv.conf:/etc/resolv.conf" \
+  -r "${TERMDEB_UROOT}" \
+  /usr/bin/env -i \
+  HOME=/root USER=root TERM="${TERM:-xterm-256color}" \
+  LANG=en_US.UTF-8 \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  TERMDEB_DESKTOP_FB=/run/termdeb/fb.buf \
+  TERMDEB_DESKTOP_INPUT_SOCKET=termdeb-desktop-input \
+  /usr/local/bin/termdeb-desktop-session

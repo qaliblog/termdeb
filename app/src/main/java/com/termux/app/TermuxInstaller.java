@@ -61,12 +61,12 @@ import static com.termux.shared.termux.TermuxConstants.TERMUX_STAGING_PREFIX_DIR
  * <p/>
  * (5.2) For every other zip entry, extract it into $STAGING_PREFIX and set execute permissions if necessary.
  */
-final class TermuxInstaller {
+public final class TermuxInstaller {
 
     private static final String LOG_TAG = "TermuxInstaller";
 
     /** Performs bootstrap setup if necessary. */
-    static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
+    public static void setupBootstrapIfNeeded(final Activity activity, final Runnable whenDone) {
         String bootstrapErrorMessage;
         Error filesDirectoryAccessibleError;
 
@@ -405,6 +405,15 @@ final class TermuxInstaller {
     private static final String TERMDEB_BOX64_LIBS_DIR = TERMDEB_ASSETS_DIR + "/box64-libs";
     private static final String TERMDEB_PROOT_DISTRO_DIR = TERMDEB_ASSETS_DIR + "/proot-distro";
     private static final String TERMDEB_CONFIG_DIR = TERMDEB_ASSETS_DIR + "/config";
+
+    /**
+     * Lomiri desktop overlay bundled only by the Lomiri desktop build variant.
+     * Keeping it in its own asset directory isolates the desktop build from the
+     * original terminal build: a base APK simply has no such directory and
+     * {@link #hasDesktopAssets(Context)} returns {@code false}.
+     */
+    private static final String TERMDEB_DESKTOP_ASSETS_DIR = "termdeb-desktop";
+    private static final String TERMDEB_DESKTOP_VERSION_FILE = TERMDEB_DESKTOP_ASSETS_DIR + "/termdeb-desktop-version.json";
 
     /**
      * Shared path definitions for the TermDeb shell scripts. NOTE: paths derive from
@@ -812,6 +821,104 @@ final class TermuxInstaller {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Check if the Lomiri desktop overlay is bundled in the APK. Only the Lomiri
+     * desktop build variant ships it, so this also acts as the feature switch that
+     * routes the launcher into {@code LomiriDesktopActivity}.
+     */
+    public static boolean hasDesktopAssets(Context context) {
+        try {
+            String[] assets = context.getAssets().list(TERMDEB_DESKTOP_ASSETS_DIR);
+            return assets != null && assets.length > 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Install the Lomiri desktop overlay from the APK assets.
+     *
+     * <p>The heavy packages (Lomiri, Mir and dependencies) are already installed
+     * inside the bundled Debian trixie rootfs at build time; this only places the
+     * small runtime overlay: the host entry point in {@code $PREFIX/bin}, the guest
+     * session script and the Mir frame/input bridge in the guest's
+     * {@code /usr/local/bin}, plus the Mir desktop configuration.
+     */
+    public static void installDesktopRuntime(final Activity activity, final Runnable whenDone) {
+        new Thread() {
+            @Override
+            public void run() {
+                Context context = activity.getApplicationContext();
+                File filesDir = context.getFilesDir();
+                try {
+                    Logger.logInfo(LOG_TAG, "Installing TermDeb Lomiri desktop overlay...");
+
+                    File hostBinDir = new File(filesDir, "usr/bin");
+                    hostBinDir.mkdirs();
+                    File hostEntry = new File(hostBinDir, "termdeb-desktop");
+                    extractAsset(context, TERMDEB_DESKTOP_ASSETS_DIR + "/host/termdeb-desktop", hostEntry);
+                    setExecutable(hostEntry);
+
+                    File debianRoot = new File(filesDir, "debian-root");
+                    if (debianRoot.isDirectory()) {
+                        File guestBinDir = new File(debianRoot, "usr/local/bin");
+                        guestBinDir.mkdirs();
+                        File session = new File(guestBinDir, "termdeb-desktop-session");
+                        extractAsset(context, TERMDEB_DESKTOP_ASSETS_DIR + "/guest/termdeb-desktop-session", session);
+                        setExecutable(session);
+
+                        // The Mir bridge binary is compiled and installed into the rootfs
+                        // at build time (provision-desktop.sh). Extract a bundled copy only
+                        // when the desktop build also ships one; absence is not fatal.
+                        try {
+                            File bridge = new File(guestBinDir, "termdeb-mir-bridge");
+                            extractAsset(context, TERMDEB_DESKTOP_ASSETS_DIR + "/guest/termdeb-mir-bridge", bridge);
+                            setExecutable(bridge);
+                        } catch (Exception e) {
+                            Logger.logWarn(LOG_TAG, "Optional bundled Mir bridge not present: " + e.getMessage());
+                        }
+
+                        ensureDir(new File(debianRoot, "etc/termdeb"), 0755);
+                        extractAssetDirectory(context, TERMDEB_DESKTOP_ASSETS_DIR + "/guest/etc",
+                            new File(debianRoot, "etc/termdeb"));
+                    } else {
+                        Logger.logWarn(LOG_TAG, "Debian rootfs not present; desktop overlay partially installed");
+                    }
+
+                    java.io.FileOutputStream marker = new java.io.FileOutputStream(new File(filesDir, "termdeb-desktop.installed"));
+                    marker.write(getDesktopVersion(context).getBytes());
+                    marker.close();
+
+                    Logger.logInfo(LOG_TAG, "Lomiri desktop overlay installed.");
+                    activity.runOnUiThread(whenDone);
+                } catch (Exception e) {
+                    Logger.logError(LOG_TAG, "Desktop overlay installation failed: " + e.getMessage());
+                    activity.runOnUiThread(whenDone);
+                }
+            }
+        }.start();
+    }
+
+    /** Read the bundled Lomiri desktop overlay version. */
+    public static String getDesktopVersion(Context context) {
+        try {
+            java.io.InputStream is = context.getAssets().open(TERMDEB_DESKTOP_VERSION_FILE);
+            byte[] data = new byte[is.available()];
+            is.read(data);
+            is.close();
+            String json = new String(data);
+            int idx = json.indexOf("\"desktop_version\"");
+            if (idx > 0) {
+                int colonIdx = json.indexOf(":", idx);
+                int quoteStart = json.indexOf("\"", colonIdx + 1);
+                int quoteEnd = json.indexOf("\"", quoteStart + 1);
+                return json.substring(quoteStart + 1, quoteEnd);
+            }
+        } catch (Exception ignored) {
+        }
+        return "unknown";
     }
 
     /**

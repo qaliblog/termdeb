@@ -11,8 +11,9 @@ release/
 .cxx
 *.zip
 
-# TermDeb generated assets (downloaded at build time, not committed to git)
+# TermDeb generated assets (downloaded/staged at build time, not committed to git)
 app/src/main/assets/termdeb-runtime/
+app/src/main/assets/termdeb-desktop/
 build/termdeb-assets/
 
 # Local configuration file (sdk path, etc)

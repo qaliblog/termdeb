@@ -28,6 +28,7 @@ import android.widget.Toast;
 
 import com.termux.R;
 import com.termux.app.api.file.FileReceiverActivity;
+import com.termux.app.desktop.LomiriDesktopActivity;
 import com.termux.app.terminal.TermuxActivityRootView;
 import com.termux.app.terminal.TermuxTerminalSessionActivityClient;
 import com.termux.app.terminal.io.TermuxTerminalExtraKeys;
@@ -192,6 +193,12 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
     private static final String ARG_TERMINAL_TOOLBAR_TEXT_INPUT = "terminal_toolbar_text_input";
     private static final String ARG_ACTIVITY_RECREATED = "activity_recreated";
 
+    /**
+     * When set, the terminal UI is opened even if the Lomiri desktop overlay is present.
+     * Used by {@link LomiriDesktopActivity} to expose the classic terminal.
+     */
+    public static final String EXTRA_FORCE_TERMINAL = "com.termux.app.desktop.FORCE_TERMINAL";
+
     private static final String LOG_TAG = "TermuxActivity";
 
     @Override
@@ -212,6 +219,17 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setActivityTheme();
 
         super.onCreate(savedInstanceState);
+
+        // Lomiri desktop build: the main app view is the desktop environment. Only the
+        // Lomiri desktop APK bundles the desktop overlay, so this is a no-op for every
+        // other build variant and the original terminal build is unaffected.
+        if (!getIntent().getBooleanExtra(EXTRA_FORCE_TERMINAL, false)
+                && TermuxInstaller.hasDesktopAssets(this)) {
+            Logger.logInfo(LOG_TAG, "TermDeb Lomiri desktop overlay present - launching desktop view");
+            startActivity(new Intent(this, LomiriDesktopActivity.class));
+            finish();
+            return;
+        }
 
         setContentView(R.layout.activity_termux);
 

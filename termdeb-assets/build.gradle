@@ -1023,3 +1023,58 @@ task termdebBuildSummary {
         logger.quiet("\n========================================\n")
     }
 }
+
+/**
+ * prepareTermDebDesktopAssets - Stage the Lomiri desktop overlay into the APK assets.
+ *
+ * This is the ONLY asset step added for the Lomiri desktop build and it is never
+ * invoked by the existing terminals build (which does not call it), so the original
+ * TermDeb build and its packaging stay byte-for-byte unaffected.
+ *
+ * The heavy payload (Lomiri, Mir and their dependencies) lives inside the Debian
+ * trixie rootfs and is installed at build time by
+ * termdeb-assets/prebuilt/provision-desktop.sh. This task only stages the small
+ * overlay that the runtime installer copies into $PREFIX and the guest:
+ *
+ *   app/src/main/assets/termdeb-desktop/host/termdeb-desktop
+ *   app/src/main/assets/termdeb-desktop/guest/termdeb-desktop-session
+ *   app/src/main/assets/termdeb-desktop/termdeb-desktop-version.json
+ */
+task prepareTermDebDesktopAssets {
+    description = 'Stages the Lomiri desktop overlay (host/guest scripts) into app/src/main/assets/termdeb-desktop'
+    group = 'TermDeb'
+
+    doLast {
+        def rootDir = project.rootDir
+        def desktopAssetsDir = new File(rootDir, 'app/src/main/assets/termdeb-desktop')
+        def hostDir = new File(desktopAssetsDir, 'host')
+        def guestDir = new File(desktopAssetsDir, 'guest')
+        hostDir.mkdirs()
+        guestDir.mkdirs()
+
+        def configDir = new File(rootDir, 'termdeb-assets/config')
+        def copyOverlay = { String srcName, File dest ->
+            def src = new File(configDir, srcName)
+            if (!src.exists()) {
+                throw new GradleException('Desktop overlay source missing: ' + src.absolutePath)
+            }
+            java.nio.file.Files.copy(src.toPath(), dest.toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            logger.quiet('  [desktop] ' + srcName + ' -> ' + dest.absolutePath)
+        }
+
+        copyOverlay('termdeb-desktop', new File(hostDir, 'termdeb-desktop'))
+        copyOverlay('termdeb-desktop-session', new File(guestDir, 'termdeb-desktop-session'))
+
+        def version = project.findProperty('TERMDEB_VERSION') ?: '0.1.0'
+        def versionFile = new File(desktopAssetsDir, 'termdeb-desktop-version.json')
+        versionFile.text = '{\n' +
+            '  "desktop_version": "' + version + '",\n' +
+            '  "display_stack": "mir",\n' +
+            '  "shell": "lomiri",\n' +
+            '  "transport": "shared-memory"\n' +
+            '}\n'
+
+        logger.quiet('  [desktop] Lomiri desktop overlay staged at ' + desktopAssetsDir.absolutePath)
+    }
+}

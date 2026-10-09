@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  LomiriDesktopActivity layout.
+
+  Top:  the Lomiri desktop surface (rendered from the Mir compositor running
+        inside the Debian trixie guest; see docs/lomiri-desktop-architecture.md).
+  Bottom: the existing Termux mini-keyboard, reused verbatim through
+        @layout/view_terminal_toolbar_extra_keys and pinned to the bottom of the
+        screen. The keyboard widget and its layout are intentionally NOT changed.
+-->
+<com.termux.app.terminal.TermuxActivityRootView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:id="@+id/activity_termux_root_view"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/black"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true"
+    tools:ignore="UnusedAttribute">
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <com.termux.app.desktop.LomiriDesktopView
+            android:id="@+id/lomiri_desktop_surface"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="@color/black" />
+
+        <!-- Discreet escape hatch back to the classic terminal UI (keeps the
+             original TermDeb functionality reachable from the desktop). -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/lomiri_desktop_terminal_button"
+            style="@style/Widget.MaterialComponents.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|end"
+            android:layout_margin="8dp"
+            android:alpha="0.6"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingLeft="10dp"
+            android:paddingRight="10dp"
+            android:text="@string/action_open_terminal"
+            android:textColor="@android:color/white"
+            android:textSize="12sp" />
+
+    </FrameLayout>
+
+    <!-- The mini-keyboard container: fixed height is set in code (rows * toolbar height),
+         exactly like TermuxActivity does for the terminal toolbar. -->
+    <FrameLayout
+        android:id="@+id/lomiri_desktop_keyboard_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/black">
+
+        <!-- Reused unchanged: the mini-keyboard layout and ExtraKeysView widget. -->
+        <include layout="@layout/view_terminal_toolbar_extra_keys" />
+
+    </FrameLayout>
+
+    <View
+        android:id="@+id/lomiri_desktop_bottom_space_view"
+        android:layout_width="match_parent"
+        android:layout_height="1dp"
+        android:background="@android:color/transparent" />
+
+</com.termux.app.terminal.TermuxActivityRootView>

@@ -76,6 +76,21 @@
                 android:resource="@xml/shortcuts" />
         </activity>
 
+        <!--
+            Lomiri desktop variant of the main view. Only the Lomiri desktop build
+            ships the desktop overlay, so on every other build the launcher stays on
+            TermuxActivity and this activity is simply unreachable.
+        -->
+        <activity
+            android:name=".app.desktop.LomiriDesktopActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|density|screenLayout|keyboard|keyboardHidden|navigation"
+            android:label="@string/application_name"
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:theme="@style/Theme.TermuxActivity.DayNight.NoActionBar"
+            tools:targetApi="n" />
+
         <activity-alias
             android:name=".HomeActivity"
             android:exported="true"

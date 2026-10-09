@@ -1,0 +1,180 @@
+#!/bin/bash
+# termdeb-desktop-session - Guest side of the TermDeb Lomiri desktop
+#
+# Runs INSIDE the packaged Debian trixie userspace (under proot). Brings up the
+# display stack and then the Lomiri shell:
+#
+#   1. a Mir compositor on a *virtual* output, rendered in software
+#      (mir:egl-generic) so it works without GPU/DRM access under proot;
+#   2. the Lomiri shell on top of Mir;
+#   3. termdeb-mir-bridge, which captures Mir's output with the Wayland
+#      wlr-screencopy protocol into a shared framebuffer that the Android app
+#      maps, and injects input from the app through the Wayland virtual
+#      keyboard/pointer protocols.
+#
+# The framebuffer and input socket live in /run/termdeb, which the host script
+# bind-mounts from the app's data directory. This is a local shared-memory
+# display path, NOT VNC or a remote desktop.
+#
+# Copyright (c) TermDeb Contributors
+# SPDX-License-Identifier: MIT
+
+set -u
+
+log() { echo "TermDeb desktop[guest]: $*"; }
+
+FB_PATH="${TERMDEB_DESKTOP_FB:-/run/termdeb/fb.buf}"
+INPUT_SOCKET="${TERMDEB_DESKTOP_INPUT_SOCKET:-termdeb-desktop-input}"
+
+# ---- Runtime directory ------------------------------------------------------
+# Android only permits writable app-private storage; /run may not exist in the
+# rootfs (systemd is not PID 1 under proot), so create the runtime dirs eagerly.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/termdeb/runtime}"
+mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_RUNTIME_DIR}/pulse"
+chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
+
+# ---- Desktop geometry -------------------------------------------------------
+# The Android app preallocates the shared framebuffer and publishes the desktop
+# size in its header (width at byte 8, height at byte 12, little-endian).
+read_u32() {
+  od -An -tu4 -j "$1" -N4 "$2" 2>/dev/null | tr -d ' \n'
+}
+WIDTH=1280
+HEIGHT=800
+if [ -f "${FB_PATH}" ]; then
+  _w=$(read_u32 8 "${FB_PATH}")
+  _h=$(read_u32 12 "${FB_PATH}")
+  [ -n "${_w}" ] && [ "${_w}" -gt 0 ] 2>/dev/null && WIDTH="${_w}"
+  [ -n "${_h}" ] && [ "${_h}" -gt 0 ] 2>/dev/null && HEIGHT="${_h}"
+fi
+log "Desktop geometry: ${WIDTH}x${HEIGHT}"
+
+# ---- Clean up any previous session -----------------------------------------
+pkill -f termdeb-mir-bridge 2>/dev/null || true
+pkill -f lomiri 2>/dev/null || true
+pkill -f mir_demo_server 2>/dev/null || true
+pkill -f lomiri-system-compositor 2>/dev/null || true
+sleep 1
+
+cleanup() {
+  log "Shutting down desktop..."
+  [ -n "${BRIDGE_PID:-}" ] && kill "${BRIDGE_PID}" 2>/dev/null || true
+  [ -n "${LOMIRI_PID:-}" ] && kill "${LOMIRI_PID}" 2>/dev/null || true
+  [ -n "${MIR_PID:-}" ] && kill "${MIR_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+MIR_SOCKET_NAME="termdeb-mir"
+
+# ---- 1. Mir compositor (virtual output, software rendering) ------------------
+#
+# Mir's "virtual" display platform provides an offscreen output; the
+# "egl-generic" rendering platform keeps everything on llvmpipe so no DRM/GPU
+# device is required inside proot.
+MIR_BIN=""
+for candidate in mir_demo_server miral-shell lomiri-system-compositor; do
+  if command -v "${candidate}" >/dev/null 2>&1; then MIR_BIN="${candidate}"; break; fi
+done
+
+if [ -z "${MIR_BIN}" ]; then
+  log "ERROR: no Mir server binary found (expected mir_demo_server, miral-shell or lomiri-system-compositor)."
+  log "The Debian rootfs was not provisioned with the Lomiri desktop packages."
+  exit 1
+fi
+log "Starting Mir compositor: ${MIR_BIN}"
+
+case "${MIR_BIN}" in
+  mir_demo_server|miral-shell)
+    "${MIR_BIN}" \
+      --platform-display-libs mir:virtual \
+      --platform-rendering-libs mir:egl-generic \
+      --virtual-output "${WIDTH}x${HEIGHT}" \
+      --console-provider none \
+      --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1" \
+      --host-socket "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" \
+      >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
+    MIR_PID=$!
+    ;;
+  *)
+    # lomiri-system-compositor is itself a Mir server; give it the same platform
+    # hints so it can run nested on the virtual output.
+    "${MIR_BIN}" \
+      --platform-display-libs mir:virtual \
+      --platform-rendering-libs mir:egl-generic \
+      --virtual-output "${WIDTH}x${HEIGHT}" \
+      --console-provider none \
+      --host-socket "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" \
+      >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
+    MIR_PID=$!
+    ;;
+esac
+
+export WAYLAND_DISPLAY="${MIR_SOCKET_NAME}"
+export MIR_SOCKET="${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}"
+
+# Wait for the Wayland socket to appear (up to 20s).
+for _ in $(seq 1 40); do
+  [ -S "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" ] && break
+  sleep 0.5
+done
+if [ ! -S "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" ]; then
+  log "ERROR: Mir did not create the Wayland socket at ${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}."
+  log "See ${XDG_RUNTIME_DIR}/mir.log"
+  exit 1
+fi
+log "Mir is up (${MIR_SOCKET})."
+
+# ---- 2. Lomiri shell --------------------------------------------------------
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export GDK_BACKEND=wayland
+# Keep Qt from trying to reach the (absent) host system bus.
+export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.qpa.*=false}"
+
+LOMIRI_BIN=""
+for candidate in lomiri lomiri-system-compositor dm-lomiri-session; do
+  if command -v "${candidate}" >/dev/null 2>&1; then LOMIRI_BIN="${candidate}"; break; fi
+done
+
+if [ -n "${LOMIRI_BIN}" ]; then
+  log "Starting Lomiri shell: ${LOMIRI_BIN}"
+  "${LOMIRI_BIN}" >"${XDG_RUNTIME_DIR}/lomiri.log" 2>&1 &
+  LOMIRI_PID=$!
+else
+  log "WARNING: no Lomiri shell binary found; Mir is running but no desktop shell is attached."
+fi
+
+# ---- 3. Display/input bridge ------------------------------------------------
+BRIDGE_BIN=""
+for candidate in termdeb-mir-bridge /usr/local/bin/termdeb-mir-bridge; do
+  if command -v "${candidate}" >/dev/null 2>&1; then BRIDGE_BIN="${candidate}"; break; fi
+done
+
+if [ -z "${BRIDGE_BIN}" ]; then
+  log "ERROR: termdeb-mir-bridge not found; the Android surface cannot be fed."
+  exit 1
+fi
+
+log "Starting display bridge -> ${FB_PATH}"
+"${BRIDGE_BIN}" \
+  --fb "${FB_PATH}" \
+  --input-socket "${INPUT_SOCKET}" \
+  --width "${WIDTH}" \
+  --height "${HEIGHT}" \
+  >>"${XDG_RUNTIME_DIR}/bridge.log" 2>&1 &
+BRIDGE_PID=$!
+
+# Keep the session alive until the compositor/bridge exits.
+while true; do
+  if ! kill -0 "${BRIDGE_PID}" 2>/dev/null; then
+    log "Display bridge exited."
+    break
+  fi
+  if [ -n "${MIR_PID:-}" ] && ! kill -0 "${MIR_PID}" 2>/dev/null; then
+    log "Mir compositor exited."
+    break
+  fi
+  sleep 2
+done
+
+exit 0

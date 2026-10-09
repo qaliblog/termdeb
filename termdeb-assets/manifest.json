@@ -539,5 +539,44 @@
     "source": "local",
     "destination": "config/",
     "extract_to": "config/"
+  },
+  "lomiri-desktop": {
+    "description": "Lomiri desktop environment + Mir compositor, installed into the Debian trixie ARM64 rootfs at build time by termdeb-assets/prebuilt/provision-desktop.sh. Only the Lomiri desktop build variant bundles this payload; the base terminal build does not reference it, keeping the original APK unchanged.",
+    "version": "1.0.0",
+    "architecture": "arm64",
+    "install_method": "apt_install_into_rootfs",
+    "required_for_offline": false,
+    "license": "GPL-3.0+ (Lomiri) / GPL-2.0+ (Mir)",
+    "source": "Debian trixie (packages.debian.org/trixie/lomiri, packages.debian.org/trixie/mir)",
+    "packages": [
+      "lomiri",
+      "lomiri-desktop-session",
+      "mir-demos",
+      "mir-test-tools"
+    ],
+    "display_stack": {
+      "compositor": "mir",
+      "compositor_platform": "mir:virtual (offscreen output)",
+      "rendering": "mir:egl-generic (software / llvmpipe)",
+      "shell": "lomiri",
+      "capture_protocol": "wlr-screencopy-unstable-v1",
+      "input_protocols": [
+        "virtual-keyboard-unstable-v1",
+        "wlr-virtual-pointer-unstable-v1"
+      ],
+      "transport": "shared memory framebuffer + abstract AF_UNIX socket (no VNC / no remote desktop)"
+    },
+    "overlay_assets": [
+      "app/src/main/assets/termdeb-desktop/host/termdeb-desktop",
+      "app/src/main/assets/termdeb-desktop/guest/termdeb-desktop-session",
+      "app/src/main/assets/termdeb-desktop/termdeb-desktop-version.json"
+    ],
+    "bridge": {
+      "binary": "termdeb-mir-bridge",
+      "guest_path": "/usr/local/bin/termdeb-mir-bridge",
+      "source": "termdeb-assets/prebuilt/mir-bridge/termdeb-mir-bridge.c",
+      "notes": "Compiled for ARM64 inside the Debian rootfs during provisioning (provision-desktop.sh) against wayland-client and xkbcommon."
+    },
+    "notes": "The desktop session runs Mir on a virtual output with software rendering so it works under proot without DRM/GPU access. termdeb-mir-bridge copies Mir's frames into a memory-mapped file the Android app also maps, and injects app input via Wayland virtual devices."
   }
 }
