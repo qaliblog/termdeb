@@ -124,6 +124,28 @@ for extra_pkg in qtwayland5 fonts-dejavu-core fontconfig dbus-x11; do
   apt-get install -y --no-install-recommends "${extra_pkg}" || true
 done
 
+# wayland-scanner is NOT shipped by libwayland-dev in Debian trixie (only headers +
+# libraries). Install the scanner from a nearby release that still ships it as part of
+# libwayland-dev (bookworm). The scanner is a pure C tool with no version-specific
+# dependencies beyond libc/libxml2, so the bookworm binary works fine under trixie.
+echo '  [build] Installing wayland-scanner...'
+WS_DEB_ARCH="arm64"
+WS_DEB_VERSION="1.21.0-1"
+WS_DEB_URL="http://ftp.us.debian.org/debian/pool/main/w/wayland/libwayland-dev_${WS_DEB_VERSION}_${WS_DEB_ARCH}.deb"
+if ! curl -fsSL --retry 3 --retry-delay 2 "${WS_DEB_URL}" -o /tmp/libwayland-dev-ws.deb; then
+  echo "  [build] ERROR: failed to download wayland-scanner from ${WS_DEB_URL}" >&2
+  exit 1
+fi
+dpkg-deb -x /tmp/libwayland-dev-ws.deb /tmp/ws-extract
+find /tmp/ws-extract/usr/bin -name 'wayland-scanner' -type f -exec install -m 0755 {} /usr/local/bin/wayland-scanner \;
+rm -f /tmp/libwayland-dev-ws.deb
+rm -rf /tmp/ws-extract
+if [ ! -x /usr/local/bin/wayland-scanner ]; then
+  echo "  [build] ERROR: wayland-scanner installation failed" >&2
+  exit 1
+fi
+echo "  [build] wayland-scanner installed: $(wayland-scanner --version 2>&1 || true)"
+
 # ---- Build the TermDeb Mir display bridge ----
 echo '  [build] Fetching Wayland protocol definitions...'
 mkdir -p /tmp/bridge
