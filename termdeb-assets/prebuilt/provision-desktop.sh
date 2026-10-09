@@ -130,6 +130,9 @@ done
 # build-essential + libxml2-dev; wayland.dtd comes from libwayland-dev which is already
 # installed above.
 echo '  [build] Building wayland-scanner from source...'
+# wayland-scanner (wayland.git/src/scanner.c) needs: build-essential + libxml2-dev
+# (for libexpat). xml2-config gives cflags/libs for libxml2; we also link -lexpat
+# directly because scanner.c #include <expat.h> and uses the expat API.
 WS_SRC_DIR="/tmp/wayland-scanner-src"
 mkdir -p "${WS_SRC_DIR}"
 curl -fsSL --retry 3 --retry-delay 2 \
@@ -139,14 +142,13 @@ if [ ! -s "${WS_SRC_DIR}/scanner.c" ]; then
   echo "  [build] ERROR: failed to download wayland-scanner source" >&2
   exit 1
 fi
-# libxml2-dev provides xml2-config needed to compile scanner.c.
 if ! apt-get install -y --no-install-recommends libxml2-dev >/dev/null 2>&1; then
   echo "  [build] ERROR: failed to install libxml2-dev" >&2
   exit 1
 fi
 SCAN_CD="$(cd "${WS_SRC_DIR}" && pwd)"
 cc -O2 -pipe -o /usr/local/bin/wayland-scanner \
-  "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE
+  "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE -lexpat
 if [ ! -x /usr/local/bin/wayland-scanner ]; then
   echo "  [build] ERROR: wayland-scanner build failed" >&2
   exit 1
