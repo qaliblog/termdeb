@@ -210,6 +210,9 @@ if [ ! -s wlr-screencopy.h ] || [ ! -s wlr-screencopy.c ] || \
   exit 1
 fi
 
+echo "  [build] cwd=$(pwd)"
+echo "  [build] bridge src in cwd: $(ls -1 /tmp/termdeb-mir-bridge.c 2>/dev/null || echo MISSING)"
+echo "  [build] protocol files in cwd: $(ls -1 wlr-screencopy.h wlr-screencopy.c wlr-virtual-pointer.h wlr-virtual-pointer.c virtual-keyboard.h virtual-keyboard.c 2>&1)"
 echo '  [build] Compiling termdeb-mir-bridge...'
 cc -O2 -pipe -o termdeb-mir-bridge \
    /tmp/termdeb-mir-bridge.c \
