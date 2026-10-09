@@ -124,27 +124,36 @@ for extra_pkg in qtwayland5 fonts-dejavu-core fontconfig dbus-x11; do
   apt-get install -y --no-install-recommends "${extra_pkg}" || true
 done
 
-# wayland-scanner is NOT shipped by libwayland-dev in Debian trixie (only headers +
-# libraries). Install the scanner from a nearby release that still ships it as part of
-# libwayland-dev (bookworm). The scanner is a pure C tool with no version-specific
-# dependencies beyond libc/libxml2, so the bookworm binary works fine under trixie.
-echo '  [build] Installing wayland-scanner...'
-WS_DEB_ARCH="arm64"
-WS_DEB_VERSION="1.21.0-1"
-WS_DEB_URL="http://ftp.us.debian.org/debian/pool/main/w/wayland/libwayland-dev_${WS_DEB_VERSION}_${WS_DEB_ARCH}.deb"
-if ! curl -fsSL --retry 3 --retry-delay 2 "${WS_DEB_URL}" -o /tmp/libwayland-dev-ws.deb; then
-  echo "  [build] ERROR: failed to download wayland-scanner from ${WS_DEB_URL}" >&2
+# wayland-scanner is NOT shipped as a binary by libwayland-dev or any separate Debian
+# package in trixie (or any currently-releasing suite). Build it from source inside the
+# chroot: the scanner is a small C program (wayland.git/src/scanner.c) that only needs
+# build-essential + libxml2-dev; wayland.dtd comes from libwayland-dev which is already
+# installed above.
+echo '  [build] Building wayland-scanner from source...'
+WS_SRC_DIR="/tmp/wayland-scanner-src"
+mkdir -p "${WS_SRC_DIR}"
+curl -fsSL --retry 3 --retry-delay 2 \
+  "https://gitlab.freedesktop.org/wayland/wayland/-/raw/master/src/scanner.c" \
+  -o "${WS_SRC_DIR}/scanner.c"
+if [ ! -s "${WS_SRC_DIR}/scanner.c" ]; then
+  echo "  [build] ERROR: failed to download wayland-scanner source" >&2
   exit 1
 fi
-dpkg-deb -x /tmp/libwayland-dev-ws.deb /tmp/ws-extract
-find /tmp/ws-extract/usr/bin -name 'wayland-scanner' -type f -exec install -m 0755 {} /usr/local/bin/wayland-scanner \;
-rm -f /tmp/libwayland-dev-ws.deb
-rm -rf /tmp/ws-extract
+# libxml2-dev provides xml2-config needed to compile scanner.c.
+if ! apt-get install -y --no-install-recommends libxml2-dev >/dev/null 2>&1; then
+  echo "  [build] ERROR: failed to install libxml2-dev" >&2
+  exit 1
+fi
+SCAN_CD="$(cd "${WS_SRC_DIR}" && pwd)"
+cc -O2 -pipe -o /usr/local/bin/wayland-scanner \
+  "${SCAN_CD}/scanner.c" $(xml2-config --cflags --libs) -D_GNU_SOURCE
 if [ ! -x /usr/local/bin/wayland-scanner ]; then
-  echo "  [build] ERROR: wayland-scanner installation failed" >&2
+  echo "  [build] ERROR: wayland-scanner build failed" >&2
   exit 1
 fi
-echo "  [build] wayland-scanner installed: $(wayland-scanner --version 2>&1 || true)"
+strip /usr/local/bin/wayland-scanner 2>/dev/null || true
+rm -rf "${WS_SRC_DIR}"
+echo "  [build] wayland-scanner built: $(/usr/local/bin/wayland-scanner --version 2>&1 || true)"
 
 # ---- Build the TermDeb Mir display bridge ----
 echo '  [build] Fetching Wayland protocol definitions...'
