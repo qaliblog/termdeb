@@ -63,7 +63,16 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# Resolver: the CI host's /etc/resolv.conf frequently points at a systemd-resolved
+# stub (127.0.0.53) that is unreachable inside the container, which makes apt and
+# curl fail with "Temporary failure resolving <host>". docker run --dns provides a
+# working container resolver; fall back to a public resolver if it still looks wrong.
 cp /etc/resolv.conf /rootfs/etc/resolv.conf
+if ! grep -qE '^nameserver ' /rootfs/etc/resolv.conf 2>/dev/null \
+   || grep -q '127.0.0.53' /rootfs/etc/resolv.conf 2>/dev/null; then
+  printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /rootfs/etc/resolv.conf
+fi
+echo "  [docker] resolver: $(tr '\n' ' ' < /rootfs/etc/resolv.conf)"
 mkdir -p /rootfs/dev /rootfs/proc /rootfs/tmp /rootfs/sys
 chmod 1777 /rootfs/tmp
 mount --bind /dev /rootfs/dev 2>/dev/null || true
@@ -72,6 +81,8 @@ mount --bind /dev /rootfs/dev 2>/dev/null || true
 SCREENCCOPY_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-screencopy-unstable-v1.xml"
 VIRTUAL_POINTER_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-virtual-pointer-unstable-v1.xml"
 VIRTUAL_KEYBOARD_XML="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/raw/main/unstable/virtual-keyboard/virtual-keyboard-unstable-v1.xml"
+# NOTE: wayland-protocols ships virtual-keyboard-unstable-v1.xml; the build prefers
+# that copy and only falls back to this URL if the package layout changes.
 
 cp /bridge/termdeb-mir-bridge.c /rootfs/tmp/termdeb-mir-bridge.c
 
@@ -90,27 +101,39 @@ chroot /rootfs /bin/bash -c "
   fi
 
   echo '  [apt] Updating package lists...'
-  apt-get update -qq
+  if ! apt-get update -qq; then
+    echo '  [apt] ERROR: apt-get update failed (DNS/network); cannot provision Lomiri.' >&2
+    cat /etc/resolv.conf >&2 || true
+    exit 1
+  fi
 
-  echo '  [apt] Installing Lomiri + Mir (ARM64)...'
-  # Core desktop: the Lomiri shell and its display-manager session integration,
-  # the Mir compositor libraries and the Mir demo/tooling binaries used to host
-  # the virtual output.
+  echo '  [apt] Installing the Lomiri desktop (ARM64)...'
+  # Required: the Lomiri shell and its session integration, which pull in the Mir
+  # server libraries the compositor is built on.
   apt-get install -y --no-install-recommends \
-    lomiri lomiri-desktop-session \
-    mir-demos mir-test-tools || \
-    echo '  [apt] WARNING: some Mir demo packages were unavailable; continuing'
+    lomiri lomiri-desktop-session
+
+  # Optional: the Mir demo/tooling binaries used to host the virtual output.
+  # Package names differ across mirrors, so install each one independently; a
+  # missing optional package must not abort the whole transaction (apt-get
+  # installs nothing at all if any requested name is unknown).
+  for pkg in mir-test-tools mir-demos libmirserver2 libmirplatform2; do
+    if ! apt-get install -y --no-install-recommends "$pkg"; then
+      echo "  [apt] note: optional package '$pkg' unavailable; continuing"
+    fi
+  done
 
   echo '  [apt] Installing build tooling for the display bridge...'
   apt-get install -y --no-install-recommends \
     build-essential pkg-config \
     libwayland-dev libwayland-client0 wayland-protocols \
+    libxkbcommon-dev libxkbcommon0 \
     curl ca-certificates
 
-  # Optional enhancements (Qt Wayland platform integration and fonts). Missing
-  # packages must not fail the build.
-  apt-get install -y --no-install-recommends \
-    qtwayland5 fonts-dejavu-core fontconfig dbus-x11 || true
+  # Optional enhancements (Qt Wayland platform integration, fonts, session bus).
+  for pkg in qtwayland5 fonts-dejavu-core fontconfig dbus-x11; do
+    apt-get install -y --no-install-recommends "$pkg" || true
+  done
 
   # ---- Build the TermDeb Mir display bridge ----
   echo '  [build] Fetching Wayland protocol definitions...'
@@ -118,7 +141,24 @@ chroot /rootfs /bin/bash -c "
   cd /tmp/bridge
   curl -fsSL '${SCREENCCOPY_XML}' -o wlr-screencopy-unstable-v1.xml
   curl -fsSL '${VIRTUAL_POINTER_XML}' -o wlr-virtual-pointer-unstable-v1.xml
-  curl -fsSL '${VIRTUAL_KEYBOARD_XML}' -o virtual-keyboard-unstable-v1.xml
+
+  # virtual-keyboard-unstable-v1 is shipped by the Debian wayland-protocols
+  # package; prefer the on-disk copy and only download if it is absent.
+  VK_XML=$(find /usr/share/wayland-protocols -name 'virtual-keyboard-unstable-v1.xml' 2>/dev/null | head -1)
+  if [ -n "${VK_XML}" ] && [ -f "${VK_XML}" ]; then
+    echo "  [build] Using packaged virtual-keyboard protocol: ${VK_XML}"
+    cp "${VK_XML}" virtual-keyboard-unstable-v1.xml
+  else
+    curl -fsSL '${VIRTUAL_KEYBOARD_XML}' -o virtual-keyboard-unstable-v1.xml
+  fi
+
+  # Every protocol file must be present and actually contain an interface.
+  for xml in wlr-screencopy-unstable-v1.xml wlr-virtual-pointer-unstable-v1.xml virtual-keyboard-unstable-v1.xml; do
+    if [ ! -s "${xml}" ] || ! grep -q '<interface' "${xml}"; then
+      echo "  [build] ERROR: protocol definition ${xml} is missing or invalid" >&2
+      exit 1
+    fi
+  done
 
   echo '  [build] Generating protocol code...'
   wayland-scanner client-header wlr-screencopy-unstable-v1.xml wlr-screencopy.h
@@ -132,7 +172,7 @@ chroot /rootfs /bin/bash -c "
   cc -O2 -pipe -Wall -Wextra -o termdeb-mir-bridge \
      /tmp/termdeb-mir-bridge.c \
      wlr-screencopy.c wlr-virtual-pointer.c virtual-keyboard.c \
-     \$(pkg-config --cflags --libs wayland-client)
+     \$(pkg-config --cflags --libs wayland-client xkbcommon)
   strip termdeb-mir-bridge 2>/dev/null || true
 
   install -D -m 0755 termdeb-mir-bridge /usr/local/bin/termdeb-mir-bridge
@@ -155,10 +195,12 @@ echo "  [docker] Desktop provisioning complete."
 INNER_EOF
 chmod +x "${INNER_SCRIPT}"
 
+# --dns gives the container a working resolver (see the inner script); do NOT
+# bind-mount the host resolv.conf, which on CI points at a systemd-resolved stub.
 docker run --rm --privileged --platform linux/arm64 \
+  --dns 8.8.8.8 --dns 1.1.1.1 \
   -v "${ROOTFS_DIR}:/rootfs" \
   -v "${STAGE_DIR}:/bridge:ro" \
-  -v /etc/resolv.conf:/etc/resolv.conf:ro \
   -v "${INNER_SCRIPT}:/inner.sh:ro" \
   debian:trixie \
   /bin/bash /inner.sh
