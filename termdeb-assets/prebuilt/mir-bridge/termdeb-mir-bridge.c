@@ -49,8 +49,8 @@
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
-#include "wlr-screencopy.h"
-#include "wlr-virtual-pointer.h"
+#include "zwlr-screencopy.h"
+#include "zwlr-virtual-pointer.h"
 #include "virtual-keyboard.h"
 
 #define FB_MAGIC 0x42464454u

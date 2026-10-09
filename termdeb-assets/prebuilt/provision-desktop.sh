@@ -151,17 +151,17 @@ for xml in wlr-screencopy-unstable-v1.xml wlr-virtual-pointer-unstable-v1.xml vi
 done
 
 echo '  [build] Generating protocol code...'
-wayland-scanner client-header wlr-screencopy-unstable-v1.xml wlr-screencopy.h
-wayland-scanner private-code  wlr-screencopy-unstable-v1.xml wlr-screencopy.c
-wayland-scanner client-header wlr-virtual-pointer-unstable-v1.xml wlr-virtual-pointer.h
-wayland-scanner private-code  wlr-virtual-pointer-unstable-v1.xml wlr-virtual-pointer.c
+wayland-scanner client-header wlr-screencopy-unstable-v1.xml zwlr-screencopy.h
+wayland-scanner private-code  wlr-screencopy-unstable-v1.xml zwlr-screencopy.c
+wayland-scanner client-header wlr-virtual-pointer-unstable-v1.xml zwlr-virtual-pointer.h
+wayland-scanner private-code  wlr-virtual-pointer-unstable-v1.xml zwlr-virtual-pointer.c
 wayland-scanner client-header virtual-keyboard-unstable-v1.xml virtual-keyboard.h
 wayland-scanner private-code  virtual-keyboard-unstable-v1.xml virtual-keyboard.c
 
 echo '  [build] Compiling termdeb-mir-bridge...'
 cc -O2 -pipe -o termdeb-mir-bridge \
    /tmp/termdeb-mir-bridge.c \
-   wlr-screencopy.c wlr-virtual-pointer.c virtual-keyboard.c \
+   zwlr-screencopy.c zwlr-virtual-pointer.c virtual-keyboard.c \
    $(pkg-config --cflags --libs wayland-client xkbcommon)
 strip termdeb-mir-bridge 2>/dev/null || true
 
