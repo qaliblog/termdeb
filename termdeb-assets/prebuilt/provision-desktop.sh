@@ -199,6 +199,17 @@ wayland-scanner private-code  wlr-virtual-pointer-unstable-v1.xml wlr-virtual-po
 wayland-scanner client-header virtual-keyboard-unstable-v1.xml virtual-keyboard.h
 wayland-scanner private-code  virtual-keyboard-unstable-v1.xml virtual-keyboard.c
 
+echo '  [build] Generated protocol files:' $(ls -1 *.h *.c 2>/dev/null | tr '
+' ' ')
+
+if [ ! -s wlr-screencopy.h ] || [ ! -s wlr-screencopy.c ] || \
+   [ ! -s wlr-virtual-pointer.h ] || [ ! -s wlr-virtual-pointer.c ] || \
+   [ ! -s virtual-keyboard.h ] || [ ! -s virtual-keyboard.c ]; then
+  echo "  [build] ERROR: wayland-scanner did not generate all protocol files" >&2
+  ls -l *.xml *.h *.c 2>&1
+  exit 1
+fi
+
 echo '  [build] Compiling termdeb-mir-bridge...'
 cc -O2 -pipe -o termdeb-mir-bridge \
    /tmp/termdeb-mir-bridge.c \
