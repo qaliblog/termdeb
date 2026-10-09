@@ -66,11 +66,14 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-SCREENCCOPY_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-screencopy-unstable-v1.xml"
-VIRTUAL_POINTER_XML="https://gitlab.freedesktop.org/wayland/wlr-protocols/-/raw/master/unstable/wlr-virtual-pointer-unstable-v1.xml"
+# Protocol sources are deliberately on raw.githubusercontent.com. The
+# gitlab.freedesktop.org /-/raw/ endpoint is NOT usable from CI: for anonymous
+# automated fetches it answers with an HTML sign-in page and HTTP 200, so
+# `curl -f` succeeds and leaves a non-XML file behind.
+SCREENCCOPY_XML="https://raw.githubusercontent.com/swaywm/wlr-protocols/master/unstable/wlr-screencopy-unstable-v1.xml"
+VIRTUAL_POINTER_XML="https://raw.githubusercontent.com/swaywm/wlr-protocols/master/unstable/wlr-virtual-pointer-unstable-v1.xml"
 # virtual-keyboard-unstable-v1 is NOT shipped by wayland-protocols (verified
-# across tags 1.31..1.49 and main); it is maintained by wlroots. The old
-# wayland-protocols URL 404s and aborted provisioning.
+# across tags 1.31..1.49 and main); it is maintained by wlroots.
 VIRTUAL_KEYBOARD_XML="https://raw.githubusercontent.com/swaywm/wlroots/master/protocol/virtual-keyboard-unstable-v1.xml"
 
 # Do not start services during package installation under this chroot.
@@ -126,8 +129,8 @@ echo '  [build] Fetching Wayland protocol definitions...'
 mkdir -p /tmp/bridge
 cd /tmp/bridge
 
-curl -fsSL "${SCREENCCOPY_XML}" -o wlr-screencopy-unstable-v1.xml
-curl -fsSL "${VIRTUAL_POINTER_XML}" -o wlr-virtual-pointer-unstable-v1.xml
+curl -fsSL --retry 3 --retry-delay 2 "${SCREENCCOPY_XML}" -o wlr-screencopy-unstable-v1.xml
+curl -fsSL --retry 3 --retry-delay 2 "${VIRTUAL_POINTER_XML}" -o wlr-virtual-pointer-unstable-v1.xml
 
 # virtual-keyboard-unstable-v1 is not shipped by Debian's wayland-protocols
 # package; prefer an on-disk copy if one ever appears and otherwise download
@@ -137,7 +140,7 @@ if [ -n "${VK_XML}" ] && [ -f "${VK_XML}" ]; then
   echo "  [build] Using packaged virtual-keyboard protocol: ${VK_XML}"
   cp "${VK_XML}" virtual-keyboard-unstable-v1.xml
 else
-  curl -fsSL "${VIRTUAL_KEYBOARD_XML}" -o virtual-keyboard-unstable-v1.xml
+  curl -fsSL --retry 3 --retry-delay 2 "${VIRTUAL_KEYBOARD_XML}" -o virtual-keyboard-unstable-v1.xml
 fi
 
 for xml in wlr-screencopy-unstable-v1.xml wlr-virtual-pointer-unstable-v1.xml virtual-keyboard-unstable-v1.xml; do
