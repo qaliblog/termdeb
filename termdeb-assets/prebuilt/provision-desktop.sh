@@ -74,7 +74,7 @@ SCREENCCOPY_XML="https://raw.githubusercontent.com/swaywm/wlr-protocols/master/u
 VIRTUAL_POINTER_XML="https://raw.githubusercontent.com/swaywm/wlr-protocols/master/unstable/wlr-virtual-pointer-unstable-v1.xml"
 # virtual-keyboard-unstable-v1 is NOT shipped by wayland-protocols (verified
 # across tags 1.31..1.49 and main); it is maintained by wlroots.
-VIRTUAL_KEYBOARD_XML="https://raw.githubusercontent.com/swaywm/wlroots/master/protocol/virtual-keyboard-unstable-v1.xml"
+VIRTUAL_KEYBOARD_XML="https://raw.githubusercontent.com/wlroots/wlroots/main/protocol/virtual-keyboard-unstable-v1.xml"
 
 # Do not start services during package installation under this chroot.
 if [ ! -e /usr/sbin/policy-rc.d ]; then
