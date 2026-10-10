@@ -81,6 +81,26 @@ fi
 cp "${INPUT_STUB_SRC_DIR}/termdeb-mir-input-stub.cpp" "${STAGE_DIR}/"
 cp "${INPUT_STUB_SRC_DIR}/version-script.map.in" "${STAGE_DIR}/"
 
+# Mir nested-Wayland EINTR shim (built inside the guest); see
+# prebuilt/mir-eintr-shim/.
+EINTR_SHIM_SRC_DIR="${SCRIPT_DIR}/mir-eintr-shim"
+if [ ! -f "${EINTR_SHIM_SRC_DIR}/termdeb-mir-eintr-shim.c" ]; then
+  echo "Error: Mir EINTR shim source not found in ${EINTR_SHIM_SRC_DIR}" >&2
+  exit 1
+fi
+cp "${EINTR_SHIM_SRC_DIR}/termdeb-mir-eintr-shim.c" "${STAGE_DIR}/termdeb-mir-eintr-shim.c"
+
+# The guest session script is shipped in the APK and extracted to
+# /usr/local/bin/termdeb-desktop-session at install time. Stage it here as well
+# so (a) the smoke test below can run the *real* session instead of a copy of
+# its options that drifts, and (b) the packaged rootfs is self-contained.
+SESSION_SCRIPT="${SCRIPT_DIR}/../config/termdeb-desktop-session"
+if [ ! -f "${SESSION_SCRIPT}" ]; then
+  echo "Error: guest session script not found at ${SESSION_SCRIPT}" >&2
+  exit 1
+fi
+cp "${SESSION_SCRIPT}" "${STAGE_DIR}/termdeb-desktop-session"
+
 cat > "${STAGE_DIR}/guest-provision.sh" << 'GUEST_EOF'
 #!/bin/bash
 # Runs INSIDE the Debian ARM64 rootfs (chroot) under QEMU emulation.
@@ -352,114 +372,211 @@ install -D -m 0755 "${INPUT_STUB_DIR}/input-termdeb-stub.so" "${MIR_PLATFORM_DIR
 rm -rf "${INPUT_STUB_DIR}"
 echo '  [build] Installed the Mir input platform stub (termdeb:input-stub)'
 
+# ---- Mir nested-Wayland EINTR shim -------------------------------------------
+# The Lomiri shell runs its own Mir server nested on the outer one through Mir's
+# nested-Wayland platform (mir:wayland). That platform's event loop treats a
+# poll(2) interrupted by a signal (EINTR) as fatal, and the shell spawns helper
+# children, so a child exiting kills the whole desktop:
+#
+#   ERROR: ./src/platforms/wayland/display.cpp(245): Failed to wait for event:
+#          Interrupted system call
+#
+# The shim retries those polls; see prebuilt/mir-eintr-shim/.
+echo '  [build] Building the Mir nested-Wayland EINTR shim...'
+EINTR_DIR="$(mktemp -d /tmp/termdeb-mir-eintr-shim-XXXXXX)"
+cp -f /tmp/termdeb-mir-eintr-shim.c "${EINTR_DIR}/termdeb-mir-eintr-shim.c"
+cc -O2 -fPIC -shared -Wall \
+  -o "${EINTR_DIR}/termdeb-mir-eintr-shim.so" \
+  "${EINTR_DIR}/termdeb-mir-eintr-shim.c" -ldl
+if ! nm -D --defined-only "${EINTR_DIR}/termdeb-mir-eintr-shim.so" 2>/dev/null | grep -q ' T poll'; then
+  echo '  [build] ERROR: the EINTR shim does not interpose poll()' >&2
+  nm -D --defined-only "${EINTR_DIR}/termdeb-mir-eintr-shim.so" >&2 || true
+  exit 1
+fi
+install -D -m 0755 "${EINTR_DIR}/termdeb-mir-eintr-shim.so" /usr/local/lib/termdeb-mir-eintr-shim.so
+rm -rf "${EINTR_DIR}"
+echo '  [build] Installed /usr/local/lib/termdeb-mir-eintr-shim.so'
+
 # Marker so the runtime can detect a desktop-provisioned rootfs.
 touch /etc/termdeb-desktop-provisioned
 
-# ---- Mir smoke test ----------------------------------------------------------
-# Start Mir exactly the way termdeb-assets/config/termdeb-desktop-session does and
-# require the Wayland socket to appear. Keep these options in sync with the
-# session script: the desktop previously shipped a rootfs whose Mir died during
-# startup ("Unknown command line options: --host-socket", missing platform
-# modules, no input platform) and the guest session then aborted with
-# "Mir did not create the Wayland socket".
+# ---- Desktop smoke test ------------------------------------------------------
+# Run the guest session exactly as the app does: /usr/local/bin/termdeb-desktop-session
+# is the same script the APK ships. The previous version of this test only
+# started Mir by hand and checked that a socket appeared, so a desktop whose
+# shell never attached and whose capture path never asked the compositor for a
+# frame passed the build and showed a black screen on the device. Nothing short
+# of real (non-black) desktop pixels in the shared framebuffer is accepted now.
 echo ''
-echo '  [smoke] Starting Mir with the desktop session options...'
-SMOKE_DIR="$(mktemp -d /tmp/termdeb-mir-smoke-XXXXXX)"
+echo '  [smoke] Starting the guest desktop session (Mir + Lomiri + bridge)...'
+SMOKE_DIR="$(mktemp -d /tmp/termdeb-desktop-smoke-XXXXXX)"
 export XDG_RUNTIME_DIR="${SMOKE_DIR}/runtime"
 mkdir -p "${XDG_RUNTIME_DIR}"
 SMOKE_WIDTH=1280
 SMOKE_HEIGHT=800
 SMOKE_STATUS=0
+SMOKE_FB="${SMOKE_DIR}/fb.buf"
 
-mir_demo_server \
-  --platform-display-libs mir:virtual \
-  --platform-rendering-libs mir:egl-generic \
-  --platform-input-lib termdeb:input-stub \
-  --virtual-output "${SMOKE_WIDTH}x${SMOKE_HEIGHT}" \
-  --console-provider none \
-  --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1:zwp_virtual_keyboard_manager_v1:zwlr_virtual_pointer_manager_v1:zwlr_screencopy_manager_v1" \
-  >"${SMOKE_DIR}/mir.log" 2>&1 &
-SMOKE_MIR=$!
+# The Android app preallocates the framebuffer and publishes the geometry in its
+# header (little-endian): magic "TDFB", version, width, height, stride, format,
+# seq, flags. Write the same header here so the session sizes the desktop from it.
+printf 'TDFB\x01\x00\x00\x00\x00\x05\x00\x00\x20\x03\x00\x00\x00\x14\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00' > "${SMOKE_FB}"
+truncate -s $((32 + SMOKE_WIDTH * 4 * SMOKE_HEIGHT)) "${SMOKE_FB}"
 
-SMOKE_SOCKET=""
+TERMDEB_DESKTOP_FB="${SMOKE_FB}" \
+TERMDEB_DESKTOP_INPUT_SOCKET=termdeb-desktop-input \
+  /usr/local/bin/termdeb-desktop-session >"${SMOKE_DIR}/session.log" 2>&1 &
+SMOKE_SESSION=$!
+
+# Give the session time to bring up Mir, nest the shell and render. The container
+# runs under QEMU emulation, so this is deliberately generous; it stops as soon as
+# real content appears in the framebuffer.
+#
+# Frames copied so far: byte offset 24 of the framebuffer header.
+smoke_frames() {
+  local value
+  value="$(dd if="${SMOKE_FB}" bs=4 skip=6 count=1 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n')"
+  case "${value:-x}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "${value}" ;; esac
+}
+# Non-zero bytes among the first pixels (offset 32 is the first pixel), i.e. is
+# the captured frame anything other than a black screen.
+smoke_nonblack() {
+  dd if="${SMOKE_FB}" bs=1 skip=32 count=200000 2>/dev/null | tr -d '\000' | wc -c | tr -d ' '
+}
+
+SMOKE_SEQ=0
+SMOKE_SEQ_HOLD=0
+SMOKE_NONBLACK=0
 for _ in $(seq 1 60); do
-  for _sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
-    if [ -S "${_sock}" ]; then SMOKE_SOCKET="${_sock}"; break; fi
-  done
-  [ -n "${SMOKE_SOCKET}" ] && break
-  if ! kill -0 "${SMOKE_MIR}" 2>/dev/null; then break; fi
-  sleep 0.5
+  sleep 5
+  SMOKE_SEQ="$(smoke_frames)"
+  if [ "${SMOKE_SEQ}" -gt 0 ]; then
+    SMOKE_NONBLACK="$(smoke_nonblack)"
+    if [ "${SMOKE_NONBLACK}" -gt 0 ]; then
+      # Hold the desktop open for a few more seconds. The shell must still be
+      # rendering content then, not merely have produced one frame before dying:
+      # Mir's nested-Wayland platform used to abort on a signal a few seconds
+      # after the screen appeared, which left the app with a frozen picture.
+      SMOKE_SEQ_HOLD="${SMOKE_SEQ}"
+      for _ in 1 2 3; do
+        sleep 5
+        SMOKE_SEQ_HOLD="$(smoke_frames)"
+        kill -0 "${SMOKE_SESSION}" 2>/dev/null || break
+      done
+      SMOKE_NONBLACK="$(smoke_nonblack)"
+      break
+    fi
+  fi
+  kill -0 "${SMOKE_SESSION}" 2>/dev/null || break
 done
 
-if [ -n "${SMOKE_SOCKET}" ] && [ -S "${SMOKE_SOCKET}" ]; then
-  echo "  [smoke] OK  Wayland socket created: ${SMOKE_SOCKET}"
+SMOKE_MIR_LOG="${XDG_RUNTIME_DIR}/mir.log"
+SMOKE_LOMIRI_LOG="${XDG_RUNTIME_DIR}/lomiri.log"
+SMOKE_BRIDGE_LOG="${XDG_RUNTIME_DIR}/bridge.log"
+
+if grep -q 'Mir is up (' "${SMOKE_DIR}/session.log"; then
+  echo '  [smoke] OK  the guest session started the Mir compositor'
 else
-  echo '  [smoke] FAIL Mir did not create a Wayland socket' >&2
+  echo '  [smoke] FAIL the guest session did not start the Mir compositor' >&2
   SMOKE_STATUS=1
 fi
 
-if grep -q 'Selected input driver: termdeb:input-stub' "${SMOKE_DIR}/mir.log"; then
+if grep -q 'Lomiri is up (' "${SMOKE_DIR}/session.log"; then
+  echo '  [smoke] OK  the Lomiri shell started and created its own Wayland socket'
+else
+  echo '  [smoke] FAIL the Lomiri shell did not come up' >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -q 'Starting display bridge' "${SMOKE_DIR}/session.log"; then
+  echo '  [smoke] OK  the display bridge was started on the compositor output'
+else
+  echo '  [smoke] FAIL the display bridge was not started' >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -q 'Selected input driver: termdeb:input-stub' "${SMOKE_MIR_LOG}"; then
   echo '  [smoke] OK  Mir selected the TermDeb input platform stub'
 else
   echo '  [smoke] FAIL Mir did not use termdeb:input-stub' >&2
   SMOKE_STATUS=1
 fi
 
-if grep -q 'Initial display configuration' "${SMOKE_DIR}/mir.log"; then
+if grep -q 'Initial display configuration' "${SMOKE_MIR_LOG}"; then
   echo '  [smoke] OK  Mir configured the virtual display'
 else
   echo '  [smoke] FAIL Mir did not configure the virtual display' >&2
   SMOKE_STATUS=1
 fi
 
-# Bridge: prove the display path end to end. The bridge must connect to Mir and
-# Mir must hand it a screencopy buffer; frame content needs a drawing client
-# (Lomiri), so "no frames yet" is reported, not failed.
-SMOKE_FB="${SMOKE_DIR}/fb.buf"
-: > "${SMOKE_FB}"
-if [ -n "${SMOKE_SOCKET}" ]; then
-  WAYLAND_DISPLAY="$(basename "${SMOKE_SOCKET}")" WAYLAND_DEBUG=1 \
-    timeout 8 /usr/local/bin/termdeb-mir-bridge \
-      --fb "${SMOKE_FB}" \
-      --input-socket termdeb-desktop-input \
-      --width "${SMOKE_WIDTH}" --height "${SMOKE_HEIGHT}" \
-      >"${SMOKE_DIR}/bridge.log" 2>&1 || true
-  if grep -q 'bridge running' "${SMOKE_DIR}/bridge.log"; then
-    echo '  [smoke] OK  termdeb-mir-bridge connected to Mir'
-  else
-    echo '  [smoke] FAIL termdeb-mir-bridge could not run against Mir' >&2
-    tail -n 10 "${SMOKE_DIR}/bridge.log" >&2
-    SMOKE_STATUS=1
-  fi
-  if grep -q 'zwlr_screencopy_frame_v1.*buffer(' "${SMOKE_DIR}/bridge.log"; then
-    echo '  [smoke] OK  Mir answered the screencopy capture request'
-  else
-    echo '  [smoke] FAIL Mir did not answer the screencopy capture request' >&2
-    SMOKE_STATUS=1
-  fi
-  # Frame counter at byte offset 24 of the shared-framebuffer header.
-  SMOKE_SEQ="$(dd if="${SMOKE_FB}" bs=4 skip=6 count=1 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n')"
-  echo "  [smoke] note: frames copied to the shared framebuffer: ${SMOKE_SEQ:-unknown} (no drawing client in the container)"
+# The shell has to nest on the outer compositor: Mir's virtual platform exposes no
+# display sync groups, so qtmir cannot render on it directly and the shell dies in
+# Screen::makeCurrent().
+if grep -q 'Selected display driver: mir:wayland' "${SMOKE_LOMIRI_LOG}"; then
+  echo '  [smoke] OK  the Lomiri Mir server nested on the compositor output'
+else
+  echo '  [smoke] FAIL the Lomiri Mir server did not use the nested Wayland platform' >&2
+  SMOKE_STATUS=1
 fi
 
-kill "${SMOKE_MIR}" 2>/dev/null || true
+if grep -q 'Failed to wait for event' "${SMOKE_LOMIRI_LOG}"; then
+  echo "  [smoke] FAIL Mir's nested-Wayland platform aborted on a signal (EINTR)" >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -qE 'SIGSEGV|Fatal signal' "${SMOKE_LOMIRI_LOG}"; then
+  echo '  [smoke] FAIL the Lomiri shell crashed while bringing the desktop up' >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -q 'bridge running' "${SMOKE_BRIDGE_LOG}"; then
+  echo '  [smoke] OK  termdeb-mir-bridge connected to the compositor'
+else
+  echo '  [smoke] FAIL termdeb-mir-bridge could not run against the compositor' >&2
+  SMOKE_STATUS=1
+fi
+
+if [ "${SMOKE_SEQ}" -gt 0 ] && [ "${SMOKE_NONBLACK}" -gt 0 ]; then
+  echo "  [smoke] OK  the desktop rendered into the shared framebuffer (${SMOKE_NONBLACK} non-zero pixel bytes)"
+else
+  echo "  [smoke] FAIL no desktop content reached the shared framebuffer (frames: ${SMOKE_SEQ})" >&2
+  SMOKE_STATUS=1
+fi
+
+if [ "${SMOKE_SEQ_HOLD}" -gt "${SMOKE_SEQ}" ]; then
+  echo "  [smoke] OK  the desktop kept rendering after the first frame (${SMOKE_SEQ} -> ${SMOKE_SEQ_HOLD} frames)"
+else
+  echo "  [smoke] FAIL the desktop stopped rendering after the first frame (${SMOKE_SEQ} -> ${SMOKE_SEQ_HOLD} frames)" >&2
+  SMOKE_STATUS=1
+fi
+
+# Tear the session down. The session script traps TERM and stops the compositor,
+# the shell and the bridge itself; pkill below is only a backstop.
+kill -TERM "${SMOKE_SESSION}" 2>/dev/null || true
+sleep 3
+pkill -f termdeb-mir-bridge 2>/dev/null || true
+pkill -f lomiri 2>/dev/null || true
+pkill -f mir_demo_server 2>/dev/null || true
 sleep 1
 
 if [ "${SMOKE_STATUS}" -ne 0 ]; then
   echo ''
-  echo '  [smoke] --- mir.log ---' >&2
-  tail -n 40 "${SMOKE_DIR}/mir.log" >&2 || true
+  for log in session.log mir.log lomiri.log bridge.log; do
+    echo "  [smoke] --- ${log} ---" >&2
+    tail -n 25 "${SMOKE_DIR}/${log}" >&2 2>/dev/null || true
+  done
   rm -rf "${SMOKE_DIR}"
-  echo '  [smoke] FAILED: the provisioned rootfs cannot bring the Mir desktop up.' >&2
+  echo '  [smoke] FAILED: the provisioned rootfs cannot bring the Lomiri desktop up.' >&2
   exit 1
 fi
 rm -rf "${SMOKE_DIR}"
-echo '  [smoke] Mir desktop smoke test passed'
+echo '  [smoke] Desktop smoke test passed'
 
 echo '  [apt] Installed desktop packages:'
 dpkg-query -W -f='    - %{Package} (%{Version})\n' lomiri mir-demos mir-test-tools mir-platform-graphics-virtual mir-platform-rendering-egl-generic 2>/dev/null || true
 
-rm -f /tmp/termdeb-mir-bridge.c /tmp/termdeb-mir-input-stub.cpp /tmp/version-script.map.in
+rm -f /tmp/termdeb-mir-bridge.c /tmp/termdeb-mir-input-stub.cpp /tmp/version-script.map.in \
+  /tmp/termdeb-mir-eintr-shim.c
 rm -rf /tmp/bridge
 GUEST_EOF
 
@@ -486,14 +603,22 @@ mount --bind /dev /rootfs/dev 2>/dev/null || true
 cp /bridge/termdeb-mir-bridge.c /rootfs/tmp/termdeb-mir-bridge.c
 cp /bridge/termdeb-mir-input-stub.cpp /rootfs/tmp/termdeb-mir-input-stub.cpp
 cp /bridge/version-script.map.in /rootfs/tmp/version-script.map.in
+cp /bridge/termdeb-mir-eintr-shim.c /rootfs/tmp/termdeb-mir-eintr-shim.c
 cp /bridge/guest-provision.sh /rootfs/tmp/termdeb-guest-provision.sh
 chmod 755 /rootfs/tmp/termdeb-guest-provision.sh
+
+# The desktop session entry point belongs in the rootfs too; the APK installer
+# extracts the same script from the desktop assets over it.
+mkdir -p /rootfs/usr/local/bin
+cp /bridge/termdeb-desktop-session /rootfs/usr/local/bin/termdeb-desktop-session
+chmod 755 /rootfs/usr/local/bin/termdeb-desktop-session
 
 chroot /rootfs /bin/bash /tmp/termdeb-guest-provision.sh
 
 umount /rootfs/dev 2>/dev/null || true
 rm -f /rootfs/etc/resolv.conf /rootfs/tmp/termdeb-guest-provision.sh \
   /rootfs/tmp/termdeb-mir-input-stub.cpp /rootfs/tmp/version-script.map.in \
+  /rootfs/tmp/termdeb-mir-eintr-shim.c \
   /rootfs/tmp/termdeb-mir-bridge.c
 echo "  [docker] Desktop provisioning complete."
 OUTER_EOF

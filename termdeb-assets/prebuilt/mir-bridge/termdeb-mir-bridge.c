@@ -103,6 +103,15 @@ struct bridge {
     bool capture_pending;
     bool frame_ready;
 
+    /* Current screencopy frame (an object per capture request). The manager is
+       bound at version 3 when the compositor offers it, and then the copy
+       request has to wait for the buffer_done event; on versions 1/2 it goes
+       out as soon as the buffer event arrives. */
+    struct zwlr_screencopy_frame_v1 *frame;
+    bool copy_sent;
+    bool y_invert;
+    uint32_t sc_version;
+
     uint32_t serial;
 
     /* Target framebuffer */
@@ -337,16 +346,22 @@ static void copy_frame_to_fb(struct bridge *b) {
     uint32_t copy_w = b->buf_width < b->width ? b->buf_width : b->width;
     uint32_t copy_h = b->buf_height < b->height ? b->buf_height : b->height;
     uint32_t dst_stride = b->width * 4;
-    bool xrgb = (b->shm_format == WL_SHM_FORMAT_XRGB8888);
 
     for (uint32_t row = 0; row < copy_h; row++) {
-        uint8_t *s = src + (size_t)row * b->buf_stride;
+        /* Mir always reports ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT and writes
+           the capture bottom-up, so the rows have to be flipped back. */
+        uint32_t src_row = b->y_invert ? (b->buf_height - 1u - row) : row;
+        const uint8_t *s = src + (size_t)src_row * b->buf_stride;
         uint8_t *d = dst + (size_t)row * dst_stride;
-        memcpy(d, s, (size_t)copy_w * 4);
-        if (xrgb) {
-            /* XRGB8888 leaves alpha undefined; force opaque for the Android bitmap. */
-            for (uint32_t col = 0; col < copy_w; col++)
-                d[col * 4 + 3] = 0xFF;
+
+        for (uint32_t col = 0; col < copy_w; col++) {
+            /* wl_shm ARGB8888 is B,G,R,A in memory; Bitmap.Config.ARGB_8888 (and
+               copyPixelsFromBuffer) wants R,G,B,A. Alpha is forced opaque because
+               this is composited display content presented on an opaque surface. */
+            d[col * 4 + 0] = s[col * 4 + 2];
+            d[col * 4 + 1] = s[col * 4 + 1];
+            d[col * 4 + 2] = s[col * 4 + 0];
+            d[col * 4 + 3] = 0xFF;
         }
     }
 
@@ -356,22 +371,46 @@ static void copy_frame_to_fb(struct bridge *b) {
 
 /* ------------------------------------------------------------------ screencopy */
 
+/* Ask the compositor to render the captured output into our wl_shm buffer. This
+   is what actually makes the compositor produce a frame: without it the
+   protocol never advances past the "buffer" event and no "ready" ever arrives,
+   so the Android side would only ever see the empty framebuffer (a black
+   screen). Version 3 clients have to wait for "buffer_done"; version 1/2 clients
+   must send the request as soon as they have created the buffer. */
+static void sc_send_copy(struct bridge *b) {
+    if (!b->frame || b->copy_sent || !b->buffer) return;
+    zwlr_screencopy_frame_v1_copy(b->frame, b->buffer);
+    b->copy_sent = true;
+}
+
+static void sc_finish(struct bridge *b) {
+    if (b->frame) {
+        zwlr_screencopy_frame_v1_destroy(b->frame);
+        b->frame = NULL;
+    }
+    b->copy_sent = false;
+    b->capture_pending = false;
+}
+
 static void sc_buffer(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t format,
                       uint32_t width, uint32_t height, uint32_t stride) {
-    (void)frame;
     struct bridge *b = data;
+    b->frame = frame;
+    b->copy_sent = false;
     create_shm_buffer(b, width, height, stride, format);
+    if (b->sc_version < 3) sc_send_copy(b);
 }
 
 static void sc_buffer_done(void *data, struct zwlr_screencopy_frame_v1 *frame) {
-    (void)data;
     (void)frame;
+    struct bridge *b = data;
+    sc_send_copy(b);
 }
 
 static void sc_flags(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t flags) {
-    (void)data;
     (void)frame;
-    (void)flags;
+    struct bridge *b = data;
+    b->y_invert = (flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT) != 0;
 }
 
 static void sc_ready(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t tv_sec_hi,
@@ -383,14 +422,14 @@ static void sc_ready(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_
     struct bridge *b = data;
     copy_frame_to_fb(b);
     b->frame_ready = true;
-    b->capture_pending = false;
+    sc_finish(b);
 }
 
 static void sc_failed(void *data, struct zwlr_screencopy_frame_v1 *frame) {
     (void)frame;
     struct bridge *b = data;
-    log_msg("screencopy frame failed");
-    b->capture_pending = false;
+    log_msg("screencopy: the compositor could not capture the output");
+    sc_finish(b);
 }
 
 static void sc_damage(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_t x, uint32_t y,
@@ -425,7 +464,7 @@ static const struct zwlr_screencopy_frame_v1_listener sc_frame_listener = {
 
 
 static void request_capture(struct bridge *b) {
-    if (b->capture_pending || !b->screencopy || !b->output) return;
+    if (b->capture_pending || b->frame || !b->screencopy || !b->output) return;
     struct zwlr_screencopy_frame_v1 *frame =
         zwlr_screencopy_manager_v1_capture_output(b->screencopy, 0, b->output);
     if (!frame) return;
@@ -447,7 +486,12 @@ static void registry_global(void *data, struct wl_registry *registry, uint32_t n
     } else if (strcmp(interface, wl_seat_interface.name) == 0) {
         if (!b->seat) b->seat = wl_registry_bind(registry, name, &wl_seat_interface, 5);
     } else if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
-        b->screencopy = wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, 3);
+        /* Bind the highest version we understand, but no higher than the
+           compositor offers: the copy request is sent after buffer_done from
+           version 3 on, and immediately after buffer below that. */
+        b->sc_version = version < 3 ? version : 3;
+        b->screencopy = wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface,
+                                         b->sc_version);
     } else if (strcmp(interface, zwp_virtual_keyboard_manager_v1_interface.name) == 0) {
         b->vk_manager = wl_registry_bind(registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1);
     } else if (strcmp(interface, zwlr_virtual_pointer_manager_v1_interface.name) == 0) {

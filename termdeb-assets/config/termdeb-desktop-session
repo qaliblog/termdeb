@@ -1,15 +1,21 @@
 #!/bin/bash
 # termdeb-desktop-session - Guest side of the TermDeb Lomiri desktop
 #
-# Runs INSIDE the packaged Debian trixie userspace (under proot). Brings up the
-# display stack and then the Lomiri shell:
+# Runs INSIDE the packaged Debian trixie userspace (under proot) and brings up
+# the display stack plus the bridge that feeds the Android app:
 #
-#   1. a Mir compositor on a *virtual* output, rendered in software
-#      (mir:egl-generic) so it works without GPU/DRM access under proot;
-#   2. the Lomiri shell on top of Mir;
-#   3. termdeb-mir-bridge, which captures Mir's output with the Wayland
-#      wlr-screencopy protocol into a shared framebuffer that the Android app
-#      maps, and injects input from the app through the Wayland virtual
+#   1. an OUTER Mir server (mir_demo_server) on an offscreen *virtual* output,
+#      rendered in software (mir:egl-generic) so it needs no GPU/DRM access.
+#      It owns the output the app displays and the Wayland seat the app's input
+#      is injected into;
+#   2. the LOMIRI shell, whose own Mir server (qtmir's "mirserver" QPA) nests on
+#      the outer server through Mir's nested-Wayland display platform
+#      (mir:wayland). This is required: Mir's virtual platform reports no display
+#      sync groups at all, so qtmir can never bind a render target to it and the
+#      shell dies in Screen::makeCurrent();
+#   3. termdeb-mir-bridge on the OUTER server, which captures its output with the
+#      Wayland wlr-screencopy protocol into a shared framebuffer that the Android
+#      app maps, and injects input from the app through the Wayland virtual
 #      keyboard/pointer protocols.
 #
 # The framebuffer and input socket live in /run/termdeb, which the host script
@@ -25,6 +31,13 @@ log() { echo "TermDeb desktop[guest]: $*"; }
 
 FB_PATH="${TERMDEB_DESKTOP_FB:-/run/termdeb/fb.buf}"
 INPUT_SOCKET="${TERMDEB_DESKTOP_INPUT_SOCKET:-termdeb-desktop-input}"
+
+# Weak symbol entry point for the input platform Mir needs (see below).
+MIR_INPUT_LIB="termdeb:input-stub"
+
+# Keeps Mir's nested-Wayland platform from aborting when a signal interrupts its
+# event loop; built by provision-desktop.sh, see prebuilt/mir-eintr-shim/.
+MIR_EINTR_SHIM="/usr/local/lib/termdeb-mir-eintr-shim.so"
 
 # ---- Runtime directory ------------------------------------------------------
 # Android only permits writable app-private storage; /run may not exist in the
@@ -81,21 +94,29 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# Mir creates the socket itself, named after Miral's default (wayland-0). Do not
-# pass --host-socket: that option exists in Mir 1.x only, and Mir 2.20 (Debian
-# trixie) rejects the whole invocation with
-#   Unknown command line options: --virtual-output ... --host-socket ...
-# which is what made the server die before it ever created a socket.
+# List the Wayland sockets Mir has created so far, oldest name first.
+wayland_sockets() {
+  for _sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
+    [ -S "${_sock}" ] && printf '%s\n' "${_sock}"
+  done
+}
 
-# The guest has no usable native input platform:
-#   * Debian's only input platform module is evdev (mir-platform-input-evdev10),
-#     which needs udev and /dev/input - neither exists in the Android guest;
-#   * all input arrives over Wayland from the app (virtual keyboard/pointer).
-# provision-desktop.sh therefore builds a stub input platform
-# (termdeb-assets/prebuilt/mir-input-stub) and this is the name it registers.
-MIR_INPUT_LIB="termdeb:input-stub"
+# Wait until a Wayland socket appears that is not in the "known" list.
+wait_for_new_socket() {
+  local known="$1" limit="$2" _sock
+  for _ in $(seq 1 "${limit}"); do
+    for _sock in $(wayland_sockets); do
+      case " ${known} " in
+        *" ${_sock} "*) ;;
+        *) printf '%s' "${_sock}"; return 0 ;;
+      esac
+    done
+    sleep 0.5
+  done
+  return 1
+}
 
-# ---- 1. Mir compositor (virtual output, software rendering) ------------------
+# ---- 1. Outer Mir server (virtual output, software rendering) ---------------
 #
 # Mir's "virtual" display platform provides an offscreen output sized by its own
 # --virtual-output option; the "egl-generic" rendering platform keeps everything
@@ -105,54 +126,39 @@ MIR_INPUT_LIB="termdeb:input-stub"
 # "Failed to load platform", and without --platform-input-lib it aborts with
 # "No appropriate input platform module found".
 #
-# Keep these options in sync with the smoke test in
-# termdeb-assets/prebuilt/provision-desktop.sh.
+# Do NOT pass --wayland-extensions here: the built-in default set already
+# contains everything we need (xdg_wm_base, wl_shell, zwlr_screencopy_manager_v1,
+# zwlr_virtual_pointer_manager_v1, zwp_virtual_keyboard_manager_v1,
+# zxdg_output_manager_v1, ...) and Mir refuses to start for a single unknown
+# name in that list.
 MIR_BIN=""
-for candidate in mir_demo_server miral-shell lomiri-system-compositor; do
+for candidate in mir_demo_server miral-shell; do
   if command -v "${candidate}" >/dev/null 2>&1; then MIR_BIN="${candidate}"; break; fi
 done
 
 if [ -z "${MIR_BIN}" ]; then
-  log "ERROR: no Mir server binary found (expected mir_demo_server, miral-shell or lomiri-system-compositor)."
+  log "ERROR: no Mir server binary found (expected mir_demo_server or miral-shell)."
   log "The Debian rootfs was not provisioned with the Lomiri desktop packages."
   exit 1
 fi
 log "Starting Mir compositor: ${MIR_BIN}"
 
-case "${MIR_BIN}" in
-  mir_demo_server|miral-shell)
-    "${MIR_BIN}" \
-      --platform-display-libs mir:virtual \
-      --platform-rendering-libs mir:egl-generic \
-      --platform-input-lib "${MIR_INPUT_LIB}" \
-      --virtual-output "${WIDTH}x${HEIGHT}" \
-      --console-provider none \
-      --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1:zwp_virtual_keyboard_manager_v1:zwlr_virtual_pointer_manager_v1:zwlr_screencopy_manager_v1" \
-      >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
-    MIR_PID=$!
-    ;;
-  *)
-    # lomiri-system-compositor is itself a Mir server; give it the same platform
-    # hints so it can run nested on the virtual output.
-    "${MIR_BIN}" \
-      --platform-display-libs mir:virtual \
-      --platform-rendering-libs mir:egl-generic \
-      --platform-input-lib "${MIR_INPUT_LIB}" \
-      --virtual-output "${WIDTH}x${HEIGHT}" \
-      --console-provider none \
-      >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
-    MIR_PID=$!
-    ;;
-esac
+"${MIR_BIN}" \
+  --platform-display-libs mir:virtual \
+  --platform-rendering-libs mir:egl-generic \
+  --platform-input-lib "${MIR_INPUT_LIB}" \
+  --virtual-output "${WIDTH}x${HEIGHT}" \
+  --console-provider none \
+  >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
+MIR_PID=$!
 
-# Wait for the Wayland socket Mir actually creates (up to 20s) instead of
-# assuming a name: Miral names it wayland-0 unless configured otherwise.
-MIR_SOCKET=""
+# Mir names its socket itself (wayland-0 unless something else holds it), so
+# discover it instead of assuming a name. --host-socket from Mir 1.x does not
+# exist in Mir 2.20 and would make the server reject the whole invocation.
+OUTER_SOCKET=""
 for _ in $(seq 1 40); do
-  for _sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
-    if [ -S "${_sock}" ]; then MIR_SOCKET="${_sock}"; break; fi
-  done
-  [ -n "${MIR_SOCKET}" ] && break
+  OUTER_SOCKET="$(wayland_sockets | head -1)"
+  [ -n "${OUTER_SOCKET}" ] && break
   if ! kill -0 "${MIR_PID}" 2>/dev/null; then
     log "ERROR: the Mir compositor (${MIR_BIN}) exited during startup."
     log "--- ${XDG_RUNTIME_DIR}/mir.log ---"
@@ -161,38 +167,69 @@ for _ in $(seq 1 40); do
   fi
   sleep 0.5
 done
-if [ -z "${MIR_SOCKET}" ] || [ ! -S "${MIR_SOCKET}" ]; then
+if [ -z "${OUTER_SOCKET}" ]; then
   log "ERROR: Mir did not create a Wayland socket in ${XDG_RUNTIME_DIR}."
   log "--- ${XDG_RUNTIME_DIR}/mir.log ---"
   tail -n 20 "${XDG_RUNTIME_DIR}/mir.log" 2>/dev/null || true
   exit 1
 fi
-
-# Wayland clients (Lomiri, the bridge) resolve the socket through WAYLAND_DISPLAY.
-export WAYLAND_DISPLAY="$(basename "${MIR_SOCKET}")"
-export MIR_SOCKET="${MIR_SOCKET}"
-log "Mir is up (${MIR_SOCKET})."
+OUTER_DISPLAY="$(basename "${OUTER_SOCKET}")"
+log "Mir is up (${OUTER_SOCKET})."
 
 # ---- 2. Lomiri shell --------------------------------------------------------
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
-export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
-export GDK_BACKEND=wayland
-# Keep Qt from trying to reach the (absent) host system bus.
-export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.qpa.*=false}"
-
-# Prefer the distribution's session entry point: lomiri-session sets the shell's
-# environment itself (QT_QPA_PLATFORM=wayland, WAYLAND_DISPLAY=wayland-0, IM
-# modules, --mode=full-shell) and clears MIR_SERVER_HOST_SOCKET/DISPLAY so the
-# shell does not try to nest on a stale session.
+#
+# `lomiri` always selects qtmir's "mirserver" QPA, i.e. the shell *is* a Mir
+# server: it ignores QT_QPA_PLATFORM=wayland and MIR_SERVER_HOST_SOCKET (both
+# Mir 1.x-era mechanisms). It is configured through Mir's MIR_SERVER_* variables
+# and nests on the outer server with the mir:wayland display platform, which is
+# what gives qtmir the display sink it needs. Without the nesting Lomiri probes
+# only device display platforms and dies with
+#   Failed to find any platforms for current system
+# or, when it does get a virtual platform, crashes in
+#   PlatformScreen::makeCurrent() / Screen::makeCurrent()
+# because that platform exposes no sync groups.
 LOMIRI_BIN=""
-for candidate in lomiri-session lomiri lomiri-system-compositor; do
+for candidate in lomiri lomiri-system-compositor; do
   if command -v "${candidate}" >/dev/null 2>&1; then LOMIRI_BIN="${candidate}"; break; fi
 done
 
 if [ -n "${LOMIRI_BIN}" ]; then
-  log "Starting Lomiri shell: ${LOMIRI_BIN}"
-  "${LOMIRI_BIN}" >"${XDG_RUNTIME_DIR}/lomiri.log" 2>&1 &
+  log "Starting Lomiri shell: ${LOMIRI_BIN} (nested on ${OUTER_DISPLAY})"
+  LOMIRI_ENV=(
+    "MIR_SERVER_WAYLAND_HOST=${OUTER_DISPLAY}"
+    "MIR_SERVER_PLATFORM_DISPLAY_LIBS=mir:wayland"
+    "MIR_SERVER_PLATFORM_RENDERING_LIBS=mir:egl-generic"
+    "MIR_SERVER_PLATFORM_INPUT_LIB=${MIR_INPUT_LIB}"
+    "MIR_SERVER_CONSOLE_PROVIDER=none"
+    "QT_QPA_PLATFORM=mirserver"
+    "QT_WAYLAND_DISABLE_WINDOWDECORATION=1"
+    "GDK_BACKEND=wayland"
+  )
+  # Mir's nested-Wayland event loop aborts on EINTR (see prebuilt/mir-eintr-shim);
+  # the shell spawns short-lived helpers, so a child exiting is enough to kill
+  # the desktop without this.
+  if [ -f "${MIR_EINTR_SHIM}" ]; then
+    LOMIRI_ENV+=("LD_PRELOAD=${MIR_EINTR_SHIM}")
+  else
+    log "WARNING: ${MIR_EINTR_SHIM} is missing; the shell may abort on a signal"
+  fi
+  env "${LOMIRI_ENV[@]}" "${LOMIRI_BIN}" --mode=full-shell \
+    >"${XDG_RUNTIME_DIR}/lomiri.log" 2>&1 &
   LOMIRI_PID=$!
+
+  # The nested server creates its own Wayland socket (wayland-1 when the outer
+  # server holds wayland-0). The shell's own clients - applications launched from
+  # the desktop - have to talk to *that* server, so publish it for them.
+  LOMIRI_SOCKET="$(wait_for_new_socket "${OUTER_SOCKET}" 60 || true)"
+  if [ -n "${LOMIRI_SOCKET}" ]; then
+    export WAYLAND_DISPLAY="$(basename "${LOMIRI_SOCKET}")"
+    log "Lomiri is up (${LOMIRI_SOCKET})."
+  else
+    log "WARNING: the Lomiri shell did not create its own Wayland socket yet."
+  fi
+  if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --all >/dev/null 2>&1 || true
+  fi
 else
   log "WARNING: no Lomiri shell binary found; Mir is running but no desktop shell is attached."
 fi
@@ -208,8 +245,11 @@ if [ -z "${BRIDGE_BIN}" ]; then
   exit 1
 fi
 
-log "Starting display bridge -> ${FB_PATH}"
-"${BRIDGE_BIN}" \
+# The bridge attaches to the OUTER server: that is the output showing the nested
+# Lomiri desktop, and the seat the app's input is injected into. Lomiri's Mir
+# server receives it as the nested-Wayland input platform.
+log "Starting display bridge -> ${FB_PATH} (via ${OUTER_DISPLAY})"
+WAYLAND_DISPLAY="${OUTER_DISPLAY}" "${BRIDGE_BIN}" \
   --fb "${FB_PATH}" \
   --input-socket "${INPUT_SOCKET}" \
   --width "${WIDTH}" \
@@ -225,6 +265,10 @@ while true; do
   fi
   if [ -n "${MIR_PID:-}" ] && ! kill -0 "${MIR_PID}" 2>/dev/null; then
     log "Mir compositor exited."
+    break
+  fi
+  if [ -n "${LOMIRI_PID:-}" ] && ! kill -0 "${LOMIRI_PID}" 2>/dev/null; then
+    log "Lomiri shell exited."
     break
   fi
   sleep 2

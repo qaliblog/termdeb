@@ -8,11 +8,14 @@ name: Build (Lomiri Desktop)
 # installed for ARM64. The existing terminal build and workflow remain untouched.
 #
 # Display architecture (no VNC / remote desktop):
-#   * Lomiri runs inside the packaged Debian trixie guest and uses Mir as the
-#     compositor on an offscreen "virtual" output rendered in software;
-#   * termdeb-mir-bridge captures Mir's output with the Wayland wlr-screencopy
-#     protocol and writes it to a shared, memory-mapped framebuffer that the
-#     Android app maps and presents on its surface;
+#   * an outer Mir server runs inside the packaged Debian trixie guest on an
+#     offscreen "virtual" output rendered in software;
+#   * the Lomiri shell runs its own Mir server (qtmir) nested on that output
+#     through Mir's nested-Wayland platform - the virtual platform exposes no
+#     display sync groups, so the shell cannot render on it directly;
+#   * termdeb-mir-bridge captures the outer compositor's output with the Wayland
+#     wlr-screencopy protocol and writes it to a shared, memory-mapped framebuffer
+#     that the Android app maps and presents on its surface;
 #   * the existing Termux mini-keyboard (unchanged, pinned to the bottom of the
 #     screen) and touch gestures feed input back to Mir through the Wayland
 #     virtual keyboard/pointer protocols.
@@ -230,14 +233,16 @@ jobs:
               ERRORS=$((ERRORS + 1))
             fi
 
-            # Mir's platform modules and the input platform stub. Without the display
-            # platform Mir exits before creating the Wayland socket, and without an
-            # input platform it aborts with "No appropriate input platform module
-            # found"; the guest session then fails to start the desktop.
+            # Mir's platform modules, the input platform stub the session needs
+            # (Mir aborts without one: "No appropriate input platform module
+            # found"), the nested-Wayland EINTR shim the Lomiri Mir server is
+            # preloaded with, and the guest session entry point itself.
             for CHECK in \
               'usr/lib/aarch64-linux-gnu/mir/server-platform/server-virtual\.so\.' \
               'usr/lib/aarch64-linux-gnu/mir/server-platform/renderer-egl-generic\.so\.' \
-              'usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub\.so'; do
+              'usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub\.so' \
+              'usr/local/lib/termdeb-mir-eintr-shim\.so' \
+              'usr/local/bin/termdeb-desktop-session'; do
               if echo "$ROOTFS_LIST" | grep -qE "^(\./)?${CHECK}"; then
                 echo "  rootfs ${CHECK}: PASS"
               else
@@ -343,7 +348,12 @@ jobs:
           echo "  Rootfs entries in the APK: $(printf '%s\n' "$ROOTFS_LIST" | wc -l)"
 
           ERRORS=0
-          for CHECK in usr/local/bin/termdeb-mir-bridge etc/termdeb-desktop-provisioned; do
+          for CHECK in \
+            usr/local/bin/termdeb-mir-bridge \
+            usr/local/lib/termdeb-mir-eintr-shim.so \
+            usr/local/bin/termdeb-desktop-session \
+            usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub.so \
+            etc/termdeb-desktop-provisioned; do
             if printf '%s\n' "$ROOTFS_LIST" | grep -qxE "(\./)?$CHECK"; then
               echo "  embedded $CHECK: PASS"
             else

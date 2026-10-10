@@ -32,21 +32,62 @@ workflow, so the base APK is unchanged.
                                              │  files/termdeb-desktop/  (bind-mounted guest)
 ┌──────────────── Debian trixie rootfs, proot (no root required) ────────────────────────────┐
 │  termdeb-desktop (host)  ──proot──▶  termdeb-desktop-session (guest)                        │
-│        ├── Mir compositor: mir:virtual output + mir:egl-generic software rendering          │
-│        ├── Lomiri shell (Wayland client of Mir)                                             │
+│        ├── OUTER Mir server: mir:virtual output + mir:egl-generic software rendering        │
+│        ├── Lomiri shell = its own Mir server (qtmir "mirserver" QPA), nested on the outer   │
+│        │     server through mir:wayland (MIR_SERVER_WAYLAND_HOST)                            │
 │        └── termdeb-mir-bridge                                                               │
 │               ├── wlr-screencopy  → pixels → /run/termdeb/fb.buf (shared framebuffer)       │
 │               └── abstract AF_UNIX socket ← input records ← Android app                     │
-│                     └── Wayland virtual keyboard/pointer → injected into Mir                │
+│                     └── Wayland virtual keyboard/pointer → injected into the outer server   │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why Mir on a virtual output?
+### Why an outer Mir server, and why does Lomiri nest on it?
 
 Inside proot there is no DRM/KMS device and no GPU, so Mir cannot drive a real
 output. Mir's `mir:virtual` display platform provides an offscreen output and
-`mir:egl-generic` renders it in software (llvmpipe). Lomiri is then a normal
-Wayland client of that compositor.
+`mir:egl-generic` renders it in software (llvmpipe).
+
+Lomiri cannot render on that platform directly. `lomiri --mode=full-shell` always
+selects qtmir's `mirserver` QPA - the shell *is* a Mir server, and it ignores the
+Mir 1.x mechanisms (`QT_QPA_PLATFORM=wayland`, `MIR_SERVER_HOST_SOCKET`). Pointed
+at `mir:virtual` it dies, because that platform reports **no display sync groups**:
+
+```
+void mgv::Display::for_each_display_sync_group(std::function<void(DisplaySyncGroup &)> const&)
+{
+}
+```
+
+(src/platforms/virtual/display.cpp in Mir 2.20). qtmir therefore never binds a
+render target to the screen and crashes at the first frame:
+
+```
+qtmir.screens: ScreenPlatformWindow[...]::updateExpose(exposed=true, primary=true)
+!!! Fatal signal received. Attempting cleanup, but deadlock may occur
+Mir fatal error: Unsupported attempt to continue after a fatal signal: SIGSEGV
+  PlatformScreen::makeCurrent()   <- Screen::makeCurrent() on a null render target
+```
+
+So the guest runs an outer Mir server on the virtual output, and Lomiri's Mir
+server gets a *real* display by nesting on it with Mir's nested-Wayland platform
+(`MIR_SERVER_PLATFORM_DISPLAY_LIBS=mir:wayland`,
+`MIR_SERVER_WAYLAND_HOST=wayland-0`). It then has a display sink to render into,
+and its content is composited by the outer server - which is what the bridge
+captures.
+
+Two quirks of that nesting are handled explicitly:
+
+* **EINTR.** Mir's nested-Wayland event loop treats a `poll(2)` interrupted by a
+  signal as fatal (`src/platforms/wayland/display.cpp`, still the case on main).
+  The shell spawns short-lived helpers, so a single `SIGCHLD` aborted the desktop
+  with `Failed to wait for event: Interrupted system call`.
+  `prebuilt/mir-eintr-shim/` builds a small `LD_PRELOAD` library, loaded only for
+  the shell, that retries those `poll()` calls - and only those: the caller's
+  shared object is checked before the retry.
+* **Socket names.** The nested server creates its own Wayland socket (`wayland-1`
+  while the outer server holds `wayland-0`). The session discovers both and
+  publishes the nested one for the shell's own clients.
 
 ### The display path is not VNC
 
@@ -60,7 +101,13 @@ Wayland client of that compositor.
 ### Framebuffer format
 
 `LomiriDesktopDisplay.java` and `termdeb-mir-bridge.c` share this header
-(little-endian, 32 bytes) at the start of `fb.buf`:
+(little-endian, 32 bytes) at the start of `fb.buf`. Pixels are `Bitmap`-order
+RGBA (what `Bitmap.copyPixelsFromBuffer` expects); the bridge converts from the
+Wayland `ARGB8888` layout (`B,G,R,A`) and flips the frame vertically, because Mir
+reports `ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT` and captures bottom-up. The
+bridge also has to send the protocol's `copy` request after the `buffer_done`
+event (screencopy v3): without it no frame is ever rendered and the app only sees
+the empty framebuffer.
 
 ```
 uint32 magic   = 0x42464454 ("TDFB")
@@ -120,6 +167,7 @@ rm -f "$DEBIAN_TAR"; tar -czf "$DEBIAN_TAR" -C "$STAGE" .
 | guest `/usr/local/bin/termdeb-desktop-session` | Brings up Mir, Lomiri and the bridge. |
 | guest `/usr/local/bin/termdeb-mir-bridge` | Captures Mir frames and injects input. |
 | guest `.../mir/server-platform/input-termdeb-stub.so` | Mir input platform (`termdeb:input-stub`). |
+| guest `/usr/local/lib/termdeb-mir-eintr-shim.so` | EINTR shim preloaded into the Lomiri shell (nested-Wayland `poll()`). |
 | `files/termdeb-desktop/fb.buf` | Shared framebuffer (bind-mounted to `/run/termdeb`). |
 | abstract `termdeb-desktop-input` | Input socket owned by the app. |
 
@@ -141,7 +189,9 @@ only input platform (`mir-platform-input-evdev10`) needs udev and `/dev/input`,
 and the bridge injects all input over Wayland anyway. Mir resolves platform entry
 points with `dlvsym()` under an ABI version symbol (e.g.
 `MIR_INPUT_PLATFORM_0.27`); the stub gets it through a generated linker version
-script, otherwise Mir loads the module but never detects it.
+script, otherwise Mir loads the module but never detects it. The nested server
+also gets input from the outer server's seat through its own `mir:wayland` input
+platform, which is where the app's injected events arrive.
 
 Other session-level requirements:
 
@@ -150,24 +200,41 @@ is a Mir 1.x option and is rejected. Mir creates `$XDG_RUNTIME_DIR/wayland-0`, a
 the session detects the socket instead of assuming a name.
 * **A session D-Bus** must exist before the shell starts; the session script
 starts one at `$XDG_RUNTIME_DIR/bus` when the app has not provided one.
+* **Do not override `--wayland-extensions`** on the outer server. Mir refuses to
+start at all if one name in the list is unknown, and its built-in default set
+already contains everything the session needs (`xdg_wm_base`, `wl_shell`,
+`zwlr_screencopy_manager_v1`, `zwlr_virtual_pointer_manager_v1`,
+`zwp_virtual_keyboard_manager_v1`, `zxdg_output_manager_v1`, ...).
 
 ## Known limitations / validation status
 
-Verified against the ARM64 rootfs binaries (no device): Mir starts on
-`mir:virtual` + `mir:egl-generic` + `termdeb:input-stub`, creates
-`wayland-0`, serves clients, and `termdeb-mir-bridge` binds wlr-screencopy and
-receives frame buffers. `provision-desktop.sh` runs this same sequence as a
-smoke test and fails the build if the socket never appears.
+Verified against the ARM64 rootfs binaries (no device), by running the shipped
+guest session script end to end in a chroot on an aarch64 host:
 
-Open item - the Lomiri shell itself: Debian's `lomiri` binary always uses qtmir's
-`mirserver` QPA plugin and probes *device* display platforms, so it exits with
-`Failed to find any platforms for current system` and ignores both
-`QT_QPA_PLATFORM=wayland` and `MIR_SERVER_HOST_SOCKET`. Until that is solved the
-Lomiri shell does not attach to the TermDeb Mir server (the bridge then captures
-an empty virtual output). Candidate approaches: run the shell nested on the
-guest's Wayland socket via a qtmir build/patch that honours the nested Wayland
-display platform, or ship a `lomiri-system-compositor`-based session.
+* `mir_demo_server` starts on `mir:virtual` + `mir:egl-generic` +
+  `termdeb:input-stub` and creates `wayland-0`;
+* the Lomiri shell starts, selects `mir:wayland` as its display platform, gets a
+  display sink for its screen, and creates its own socket (`wayland-1`);
+* `termdeb-mir-bridge` attaches to the outer server, captures with
+  wlr-screencopy and writes real frames into `fb.buf` - a capture of the running
+  desktop is ~96% non-black with the Lomiri wallpaper/status-bar/launcher
+  structure visible. A known-colour test client was captured correctly, i.e. the
+  frame is neither vertically flipped nor colour-channel swapped.
+* `provision-desktop.sh` runs the *same* session script as its smoke test and
+  fails the build unless non-black desktop pixels reach the shared framebuffer.
 
-Device bring-up (first-frame latency, input calibration, and which Lomiri shell
-entry point the packaged rootfs actually supports) still needs validation on a
-real ARM64 device.
+Not yet validated:
+
+* **On a real device.** Frame latency, touch calibration, proot's syscall
+  filtering, and the app-side surface path (first-frame pacing, rotation) still
+  need a device run.
+* **What the shell shows.** Input injection reaches the outer seat and the nested
+  server (both Mir input drivers are selected), but no app has been launched from
+  the  desktop and the greeter's user/AccountsService lookups fail in the guest
+  (`Failed to get 'RealName' property`, `Cannot read property 'username' of
+  undefined`), so the session may stop at the greeter rather than a logged-in
+  desktop.
+* **Applications.** Apps launched by the shell talk to the nested server through
+  `WAYLAND_DISPLAY`; the session publishes that variable, but the launch path
+  (`lomiri-app-launch`, which in the guest has no systemd user session) has not
+  been exercised.

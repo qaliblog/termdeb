@@ -555,10 +555,10 @@
       "mir-test-tools"
     ],
     "display_stack": {
-      "compositor": "mir",
-      "compositor_platform": "mir:virtual (offscreen output)",
+      "compositor": "mir (outer server on the offscreen output) + the nested Mir server inside the Lomiri shell",
+      "compositor_platform": "mir:virtual (offscreen output) for the outer server; mir:wayland (nested) for the Lomiri shell's own Mir server",
       "rendering": "mir:egl-generic (software / llvmpipe)",
-      "shell": "lomiri",
+      "shell": "lomiri (--mode=full-shell, qtmir mirserver QPA)",
       "capture_protocol": "wlr-screencopy-unstable-v1",
       "input_protocols": [
         "virtual-keyboard-unstable-v1",
@@ -575,8 +575,18 @@
       "binary": "termdeb-mir-bridge",
       "guest_path": "/usr/local/bin/termdeb-mir-bridge",
       "source": "termdeb-assets/prebuilt/mir-bridge/termdeb-mir-bridge.c",
-      "notes": "Compiled for ARM64 inside the Debian rootfs during provisioning (provision-desktop.sh) against wayland-client and xkbcommon."
+      "notes": "Compiled for ARM64 inside the Debian rootfs during provisioning (provision-desktop.sh) against wayland-client and xkbcommon. Converts Mir's screencopy frames (ARGB8888, y-inverted) into the Android bitmap layout."
     },
-    "notes": "The desktop session runs Mir on a virtual output with software rendering so it works under proot without DRM/GPU access. termdeb-mir-bridge copies Mir's frames into a memory-mapped file the Android app also maps, and injects app input via Wayland virtual devices."
+    "guest_libraries": {
+      "input_termdeb_stub": "/usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub.so",
+      "mir_eintr_shim": "/usr/local/lib/termdeb-mir-eintr-shim.so",
+      "notes": "The input stub gives Mir an input platform that needs no udev/dev/input; the EINTR shim keeps Mir's nested-Wayland event loop alive when a signal (e.g. SIGCHLD from a shell helper) interrupts its poll()."
+    },
+    "session_entry_point": {
+      "guest_path": "/usr/local/bin/termdeb-desktop-session",
+      "source": "termdeb-assets/config/termdeb-desktop-session",
+      "notes": "Also extracted from the APK assets by TermuxInstaller and staged into the rootfs during provisioning so the smoke test runs the same script."
+    },
+    "notes": "The desktop session runs an outer Mir server on a virtual output with software rendering (no DRM/GPU needed under proot) and nests the Lomiri shell's own Mir server on it through Mir's nested-Wayland platform. termdeb-mir-bridge copies the outer compositor's frames into a memory-mapped file the Android app also maps, and injects app input via Wayland virtual devices."
   }
 }
