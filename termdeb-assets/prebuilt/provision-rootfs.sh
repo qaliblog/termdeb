@@ -92,6 +92,16 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 echo "  [docker] Setting up rootfs environment..."
 cp /etc/resolv.conf /rootfs/etc/resolv.conf
+# The CI host's /etc/resolv.conf usually points at a systemd-resolved stub
+# (127.0.0.53) that is unreachable from inside the container, and apt then fails
+# with "Temporary failure resolving 'deb.debian.org'". docker run is given
+# --dns so the container resolves; fall back to public resolvers when the
+# copied file still looks wrong.
+if ! grep -qE '^nameserver ' /rootfs/etc/resolv.conf 2>/dev/null \
+   || grep -q '127.0.0.53' /rootfs/etc/resolv.conf 2>/dev/null; then
+  printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /rootfs/etc/resolv.conf
+fi
+echo "  [docker] resolver: $(tr '\n' ' ' < /rootfs/etc/resolv.conf)"
 
 # Ensure /dev, /proc, /tmp exist in the rootfs for chroot
 mkdir -p /rootfs/dev /rootfs/proc /rootfs/tmp /rootfs/sys
@@ -285,9 +295,12 @@ chmod +x "${PROVISION_INNER}"
 # Run the container with the inner script mounted.
 # --privileged is needed for bind-mounting /dev into the chroot
 # so /dev/null works inside the rootfs.
+# --dns supplies a working container resolver: do NOT bind-mount the host
+# /etc/resolv.conf, which on CI points at a systemd-resolved stub that cannot be
+# reached from the container (apt then fails to resolve deb.debian.org).
 run_docker run --rm --privileged --platform linux/arm64 \
+  --dns 8.8.8.8 --dns 1.1.1.1 \
   -v "${ROOTFS_DIR}:/rootfs" \
-  -v /etc/resolv.conf:/etc/resolv.conf:ro \
   -v "${PROVISION_INNER}:/provision.sh:ro" \
   debian:trixie \
   /bin/bash /provision.sh
