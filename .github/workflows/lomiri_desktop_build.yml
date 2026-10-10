@@ -272,6 +272,70 @@ jobs:
           echo "Generating sha256sums"
           (cd "$APK_DIR_PATH" && sha256sum *.apk > "${APK_BASENAME_PREFIX}_sha256sums") || true
 
+      - name: Verify the built APK ships the desktop rootfs
+        shell: bash {0}
+        run: |
+          echo "========================================="
+          echo "  Built APK rootfs verification"
+          echo "========================================="
+          set -e
+
+          # The desktop workflow provisions the rootfs in its own step, but the release
+          # build re-runs :termdeb-assets:prepareTermDebAssets during assembleRelease.
+          # A fallback there used to overwrite the desktop-provisioned tarball with the
+          # raw Debian rootfs, so the APK shipped without Lomiri/Mir and the desktop
+          # session aborted with "no Mir server binary found". Verify the artifact that
+          # is actually uploaded, not just the intermediate asset directory.
+          APK=$(ls "$APK_DIR_PATH"/termdeb_lomiri_*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: no Lomiri desktop APK found in $APK_DIR_PATH" >&2
+            exit 1
+          fi
+          echo "  APK: $APK"
+
+          WORK="$(mktemp -d)"
+          ENTRY=$(unzip -Z1 "$APK" | grep -E '^assets/termdeb-runtime/debian/debian-trixie-arm64\.tar($|\.gz$|\.xz$)' | head -1 || true)
+          if [ -z "$ENTRY" ]; then
+            echo "ERROR: the APK does not embed the Debian rootfs asset" >&2
+            echo "  Debian asset entries found in the APK:" >&2
+            unzip -Z1 "$APK" | grep -i debian >&2 || echo "  (none)" >&2
+            exit 1
+          fi
+          echo "  Embedded rootfs entry: $ENTRY"
+
+          unzip -p "$APK" "$ENTRY" > "$WORK/rootfs.tar"
+          case "$ENTRY" in
+            *.tar.gz|*.tgz) ROOTFS_LIST=$(tar -tzf "$WORK/rootfs.tar") ;;
+            *.tar.xz)      ROOTFS_LIST=$(tar -tJf "$WORK/rootfs.tar") ;;
+            *)             ROOTFS_LIST=$(tar -tf  "$WORK/rootfs.tar") ;;
+          esac
+          echo "  Rootfs entries in the APK: $(printf '%s\n' "$ROOTFS_LIST" | wc -l)"
+
+          ERRORS=0
+          for CHECK in usr/local/bin/termdeb-mir-bridge etc/termdeb-desktop-provisioned; do
+            if printf '%s\n' "$ROOTFS_LIST" | grep -qxE "(\./)?$CHECK"; then
+              echo "  embedded $CHECK: PASS"
+            else
+              echo "  embedded $CHECK: FAIL (missing)" >&2
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          if printf '%s\n' "$ROOTFS_LIST" | grep -qE '(^|/)usr/bin/(lomiri|lomiri-system-compositor|mir_demo_server|miral-shell)$'; then
+            echo "  embedded Lomiri/Mir binaries: PASS"
+          else
+            echo "  embedded Lomiri/Mir binaries: FAIL (missing)" >&2
+            ERRORS=$((ERRORS + 1))
+          fi
+
+          rm -rf "$WORK"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "RESULT: FAILED ($ERRORS error(s)) - the built APK does not ship a desktop-provisioned rootfs" >&2
+            exit 1
+          fi
+          echo "RESULT: THE BUILT APK SHIPS THE DESKTOP-PROVISIONED ROOTFS"
+
       - name: Upload Lomiri desktop APKs
         uses: actions/upload-artifact@v6
         with:

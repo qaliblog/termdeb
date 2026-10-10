@@ -223,6 +223,13 @@ public final class LomiriDesktopActivity extends AppCompatActivity implements Se
 
             if (!runtimeInstalled && TermuxInstaller.hasTermDebAssets(this)) {
                 TermuxInstaller.installTermDebRuntime(this, installDesktop);
+            } else if (!TermuxInstaller.isDesktopProvisioned(debianRoot) && TermuxInstaller.hasTermDebAssets(this)) {
+                // The installed rootfs came from an APK that shipped a rootfs without the
+                // Lomiri/Mir payload (or its extraction was incomplete). Reinstall the
+                // runtime so the bundled desktop-provisioned rootfs is unpacked; otherwise
+                // the guest session aborts with "no Mir server binary found", because the
+                // extraction step only runs when debian-root is absent.
+                TermuxInstaller.reinstallTermDebRuntime(this, installDesktop);
             } else {
                 installDesktop.run();
             }

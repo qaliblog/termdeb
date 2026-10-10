@@ -901,6 +901,66 @@ public final class TermuxInstaller {
         }.start();
     }
 
+    /**
+     * True when the installed guest rootfs carries the Lomiri desktop payload
+     * ({@code /etc/termdeb-desktop-provisioned}, written by provision-desktop.sh at
+     * build time, or the Mir/Lomiri binaries it installs).
+     *
+     * <p>A rootfs unpacked from an APK built before the desktop payload was bundled in
+     * the rootfs lacks all of these, and the guest session aborts with
+     * "no Mir server binary found".
+     */
+    public static boolean isDesktopProvisioned(File debianRoot) {
+        if (debianRoot == null || !debianRoot.isDirectory()) return false;
+        if (new File(debianRoot, "etc/termdeb-desktop-provisioned").isFile()) return true;
+        File guestBin = new File(debianRoot, "usr/bin");
+        for (String guestBinary : new String[]{"lomiri", "lomiri-system-compositor", "mir_demo_server", "miral-shell"}) {
+            if (new File(guestBin, guestBinary).exists()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Remove the installed Debian runtime and reinstall it from the APK assets.
+     *
+     * <p>{@link #installTermDebRuntime} only extracts the bundled rootfs when
+     * {@code debian-root} does not exist yet, so a rootfs unpacked from an APK that
+     * shipped a desktop APK without the Lomiri/Mir payload would survive every app
+     * update. Dropping the rootfs here makes the next install unpack the bundled, fully
+     * provisioned rootfs.
+     *
+     * <p>The guest home ({@code /root} is bound to {@code files/home}) is not part of the
+     * rootfs and is preserved, so user files survive. Packages installed inside the guest
+     * with apt are removed with the old rootfs.
+     */
+    public static void reinstallTermDebRuntime(final Activity activity, final Runnable whenDone) {
+        new Thread() {
+            @Override
+            public void run() {
+                Context context = activity.getApplicationContext();
+                File filesDir = context.getFilesDir();
+                try {
+                    Logger.logInfo(LOG_TAG, "Reinstalling the TermDeb Debian runtime so the bundled desktop rootfs is unpacked...");
+                    File debianDir = new File(filesDir, "debian-root");
+                    if (debianDir.exists()) {
+                        FileUtils.deleteFile("termdeb desktop debian rootfs", debianDir.getAbsolutePath(), true);
+                    }
+                    File readyMarker = new File(filesDir, ".termdeb-runtime-ready");
+                    if (readyMarker.exists() && !readyMarker.delete()) {
+                        Logger.logWarn(LOG_TAG, "Could not remove the runtime ready marker; reinstall still proceeds");
+                    }
+                    File stagingDir = new File(filesDir, "debian-root.staging");
+                    if (stagingDir.exists()) {
+                        FileUtils.deleteFile("termdeb debian staging directory", stagingDir.getAbsolutePath(), true);
+                    }
+                } catch (Exception e) {
+                    Logger.logError(LOG_TAG, "Could not remove the stale Debian runtime: " + e.getMessage());
+                }
+                installTermDebRuntime(activity, whenDone);
+            }
+        }.start();
+    }
+
     /** Read the bundled Lomiri desktop overlay version. */
     public static String getDesktopVersion(Context context) {
         try {

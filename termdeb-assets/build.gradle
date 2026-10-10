@@ -280,25 +280,44 @@ task prepareTermDebAssets {
                 def apkDebian = new File(termdebApkAssetsDir, "debian/debian-trixie-arm64.tar.gz")
                 apkDebian.parentFile.mkdirs()
 
+                // The APK rootfs asset is authoritative once it carries a provisioning
+                // marker: either /etc/termdeb-provisioned (base provisioning: systemd,
+                // dbus, ca-certificates, locales) or /etc/termdeb-desktop-provisioned
+                // (desktop provisioning: Lomiri, Mir and the TermDeb Mir bridge). Either
+                // marker means the tarball is a provisioned rootfs and must never be
+                // replaced by the raw upstream download.
+                //
+                // This matters because assembleRelease re-runs this task: the desktop
+                // workflow desktop-provisions the rootfs in an earlier step, then the
+                // release build runs this task again, base provisioning fails (Docker
+                // unavailable/short-lived) and the raw rootfs used to be copied over the
+                // desktop-provisioned tarball. The APK then shipped a rootfs with no
+                // Lomiri/Mir payload and the desktop session died at startup with
+                // "no Mir server binary found".
+                def provisionMarkers = ['etc/termdeb-provisioned', 'etc/termdeb-desktop-provisioned']
+                def findProvisionMarker = { File tarFile ->
+                    if (tarFile == null || !tarFile.exists() || tarFile.length() <= 0) return null
+                    try {
+                        def proc = ["sh", "-c", "tar -tzf ${tarFile.absolutePath} 2>/dev/null"].execute()
+                        def listing = new StringBuilder()
+                        proc.consumeProcessOutput(listing, new StringBuilder())
+                        proc.waitFor()
+                        if (proc.exitValue() != 0) return null
+                        def entries = listing.toString().readLines()
+                        return provisionMarkers.find { marker ->
+                            entries.any { entry -> entry == marker || entry == './' + marker }
+                        }
+                    } catch (Exception ignored) {
+                        return null // not a readable tarball, so not provisioned
+                    }
+                }
+                def existingMarker = findProvisionMarker(apkDebian)
+
                 if (provisionRootfs && !termdebOffline) {
                     // ---- PRE-PROVISIONED MODE ----
-                    // Check if the existing APK assets tarball is already provisioned.
-                    // A provisioned rootfs is significantly larger (~41MB) than the raw
-                    // Debian trixie rootfs (~48MB) and contains the /etc/termdeb-provisioned marker.
-                    boolean alreadyProvisioned = false
-                    if (apkDebian.exists()) {
-                        // Check for the marker inside the tarball
-                        try {
-                            def checkCmd = "tar -tzf ${apkDebian.absolutePath} 2>/dev/null | grep -c etc/termdeb-provisioned"
-                            def proc = ["sh", "-c", checkCmd].execute()
-                            def output = new StringBuilder()
-                            proc.consumeProcessOutput(output, new StringBuilder())
-                            proc.waitFor()
-                            if (proc.exitValue() == 0 && output.toString().trim().toInteger() > 0) {
-                                alreadyProvisioned = true
-                                logger.quiet("  [debian] APK assets already contain a provisioned rootfs (${apkDebian.length() / (1024*1024)} MB) - skipping re-provisioning.")
-                            }
-                        } catch (Exception ignored) { /* not provisioned or can't read */ }
+                    boolean alreadyProvisioned = existingMarker != null
+                    if (alreadyProvisioned) {
+                        logger.quiet("  [debian] APK assets already contain a provisioned rootfs (${existingMarker}, ${apkDebian.length() / (1024*1024)} MB) - keeping it as-is.")
                     }
 
                     if (alreadyProvisioned) {
@@ -363,20 +382,30 @@ task prepareTermDebAssets {
                     }
 
                     if (!provisioned) {
-                        // Fall back: copy raw Debian trixie rootfs tarball to APK assets
-                        if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
+                        // Fall back: copy raw Debian trixie rootfs tarball to APK assets,
+                        // but never overwrite a tarball that already carries a provisioning
+                        // marker (see findProvisionMarker above).
+                        if (existingMarker != null) {
+                            logger.quiet("  [debian] Keeping the existing provisioned rootfs (${existingMarker}); not overwriting it with the raw download.")
+                        } else if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
                             java.nio.file.Files.copy(debianTar.toPath(), apkDebian.toPath(),
                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                         }
-                        logger.quiet("  [debian] READY (trixie ARM64, STANDARD MODE, ${debianTar.length() / (1024*1024)} MB)")
+                        logger.quiet("  [debian] READY (trixie ARM64, ${debianTar.length() / (1024*1024)} MB)")
                         assetsReady++
                     }
                     } // end !alreadyProvisioned
                 } else {
                     // ---- STANDARD MODE (no pre-provisioning) ----
-                    // Copy raw Debian trixie rootfs tarball to APK assets.
-                    // Provisioning (apt-get install) runs at first launch inside the device.
-                    if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
+                    // Copy the raw Debian trixie rootfs to the APK assets so provisioning
+                    // (apt-get install) runs at first launch on the device. A tarball that
+                    // already carries a provisioning marker is kept as-is: the desktop
+                    // workflow provisions the rootfs before assembleRelease re-runs this
+                    // task, and overwriting it there shipped a desktop APK whose rootfs had
+                    // no Lomiri/Mir payload.
+                    if (existingMarker != null) {
+                        logger.quiet("  [debian] Keeping the existing provisioned rootfs (${existingMarker}, ${apkDebian.length() / (1024*1024)} MB); not overwriting it with the raw download.")
+                    } else if (!apkDebian.exists() || apkDebian.length() != debianTar.length()) {
                         java.nio.file.Files.copy(debianTar.toPath(), apkDebian.toPath(),
                             java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                     }

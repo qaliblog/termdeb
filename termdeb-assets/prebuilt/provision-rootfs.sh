@@ -127,7 +127,7 @@ chroot /rootfs /bin/bash -c '
   fi
 
   # Android devices commonly return IPv6 records for deb.debian.org while
-  # the app's network path only permits IPv4; prefer IPv4 to avoid long connect
+  # the app network path only permits IPv4; prefer IPv4 to avoid long connect
   # timeouts and misleading partial-update errors. Do not replace an existing
   # administrator setting.
   if ! grep -Rqs '^Acquire::ForceIPv4' /etc/apt/apt.conf.d 2>/dev/null; then
