@@ -286,7 +286,12 @@ jobs:
           # raw Debian rootfs, so the APK shipped without Lomiri/Mir and the desktop
           # session aborted with "no Mir server binary found". Verify the artifact that
           # is actually uploaded, not just the intermediate asset directory.
-          APK=$(ls "$APK_DIR_PATH"/termdeb_lomiri_*.apk 2>/dev/null | head -1)
+          # AGP names the release APK termdeb_<version>-<variant>-lomiri-desktop-github-release_universal.apk,
+          # i.e. not after APK_BASENAME_PREFIX (that prefix only names the sha256sums file),
+          # so glob the output directory rather than the prefix.
+          echo "  APKs in $APK_DIR_PATH:"
+          ls -lh "$APK_DIR_PATH"/*.apk 2>/dev/null || true
+          APK=$(ls "$APK_DIR_PATH"/*.apk 2>/dev/null | head -1)
           if [ -z "$APK" ]; then
             echo "ERROR: no Lomiri desktop APK found in $APK_DIR_PATH" >&2
             exit 1

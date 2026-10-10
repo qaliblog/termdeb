@@ -99,7 +99,13 @@ chmod 1777 /rootfs/tmp
 # Bind-mount host /dev into rootfs so /dev/null works inside chroot
 mount --bind /dev /rootfs/dev 2>/dev/null || true
 
-chroot /rootfs /bin/bash -c '
+# Run the guest provisioning from a real file rather than a single-quoted `bash -c`
+# argument. The guest script contains single quotes (grep -qE '^en_US.UTF-8...',
+# printf '...'), which terminated the -c string early and silently truncated the
+# whole provisioning: the shell then died with
+# "-c: line N: syntax error: unexpected end of file" and the rootfs shipped
+# un-provisioned.
+cat > /rootfs/tmp/termdeb-base-provision.sh << 'BASE_GUEST_EOF'
   export DEBIAN_FRONTEND=noninteractive
   export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   export TMPDIR=/tmp
@@ -263,7 +269,10 @@ DPKGEOF
     systemd dbus ca-certificates locales \
     curl wget git unzip \
     build-essential gnupg gpgv 2>/dev/null | head -30
-'
+BASE_GUEST_EOF
+chmod 755 /rootfs/tmp/termdeb-base-provision.sh
+chroot /rootfs /bin/bash /tmp/termdeb-base-provision.sh
+rm -f /rootfs/tmp/termdeb-base-provision.sh
 
 # Unmount /dev from rootfs
 umount /rootfs/dev 2>/dev/null || true
