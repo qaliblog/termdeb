@@ -170,23 +170,42 @@ echo '  [build] Fetching Wayland protocol definitions...'
 mkdir -p /tmp/bridge
 cd /tmp/bridge
 
-curl -fsSL --retry 3 --retry-delay 2 "${SCREENCCOPY_XML}" -o wlr-screencopy-unstable-v1.xml
-curl -fsSL --retry 3 --retry-delay 2 "${VIRTUAL_POINTER_XML}" -o wlr-virtual-pointer-unstable-v1.xml
+# Prefer a checked-in copy of each protocol XML so the build stays reproducible
+# even when upstream raw.githubusercontent.com / gitlab endpoints are flaky from
+# the CI network. Use the downloaded URL as a fallback only when the local copy
+# is absent or empty.
+fetch_xml() {
+  local url="$1" local_file="$2" label="$3"
+  if [ -s "${local_file}" ] && grep -q '<interface' "${local_file}" 2>/dev/null; then
+    cp "${local_file}" "${url##*/}"
+    echo "  [build] Using local ${label} protocol: ${local_file}"
+  else
+    curl -fsSL --retry 3 --retry-delay 2 "${url}" -o "${url##*/}" || true
+    if [ ! -s "${url##*/}" ] || ! grep -q '<interface' "${url##*/}" 2>/dev/null; then
+      echo "  [build] ERROR: ${label} protocol XML is missing or invalid" >&2
+      exit 1
+    fi
+    echo "  [build] Downloaded ${label} protocol from ${url}"
+  fi
+}
 
-# virtual-keyboard-unstable-v1 is not shipped by Debian's wayland-protocols
-# package; prefer an on-disk copy if one ever appears and otherwise download
-# the wlroots-maintained definition.
-VK_XML="$(find /usr/share/wayland-protocols -name 'virtual-keyboard-unstable-v1.xml' 2>/dev/null | head -1)"
-if [ -n "${VK_XML}" ] && [ -f "${VK_XML}" ]; then
-  echo "  [build] Using packaged virtual-keyboard protocol: ${VK_XML}"
-  cp "${VK_XML}" virtual-keyboard-unstable-v1.xml
-else
-  curl -fsSL --retry 3 --retry-delay 2 "${VIRTUAL_KEYBOARD_XML}" -o virtual-keyboard-unstable-v1.xml
-fi
+# Local fallback copies of the three protocol XML files so this build stays
+# reproducible even when the upstream raw.githubusercontent.com endpoints are
+# unavailable from the CI network. These are the exact XML documents this build
+# has already used successfully; keep them in sync with the URL variables above
+# if the upstream protocol versions change.
+SCREENCCOPY_XML_LOCAL="termdeb-assets/prebuilt/wlr-screencopy-unstable-v1.xml"
+VIRTUAL_POINTER_XML_LOCAL="termdeb-assets/prebuilt/wlr-virtual-pointer-unstable-v1.xml"
+VIRTUAL_KEYBOARD_XML_LOCAL="termdeb-assets/prebuilt/virtual-keyboard-unstable-v1.xml"
+
+fetch_xml "${SCREENCCOPY_XML}" "${SCREENCCOPY_XML_LOCAL}" "wlr-screencopy"
+fetch_xml "${VIRTUAL_POINTER_XML}" "${VIRTUAL_POINTER_XML_LOCAL}" "wlr-virtual-pointer"
+fetch_xml "${VIRTUAL_KEYBOARD_XML}" "${VIRTUAL_KEYBOARD_XML_LOCAL}" "virtual-keyboard"
 
 for xml in wlr-screencopy-unstable-v1.xml wlr-virtual-pointer-unstable-v1.xml virtual-keyboard-unstable-v1.xml; do
   if [ ! -s "${xml}" ] || ! grep -q '<interface' "${xml}"; then
     echo "  [build] ERROR: protocol definition ${xml} is missing or invalid" >&2
+    ls -l "${xml}" 2>&1 || true
     exit 1
   fi
 done
@@ -202,30 +221,31 @@ wayland-scanner private-code  virtual-keyboard-unstable-v1.xml virtual-keyboard.
 echo '  [build] Generated protocol files:' $(ls -1 *.h *.c 2>/dev/null | tr '
 ' ' ')
 
-if [ ! -s wlr-screencopy.h ] || [ ! -s wlr-screencopy.c ] || \
-   [ ! -s wlr-virtual-pointer.h ] || [ ! -s wlr-virtual-pointer.c ] || \
-   [ ! -s virtual-keyboard.h ] || [ ! -s virtual-keyboard.c ]; then
+if [ ! -s wlr-screencopy.h ] || [ ! -s wlr-screencopy.c ] ||    [ ! -s wlr-virtual-pointer.h ] || [ ! -s wlr-virtual-pointer.c ] ||    [ ! -s virtual-keyboard.h ] || [ ! -s virtual-keyboard.c ]; then
   echo "  [build] ERROR: wayland-scanner did not generate all protocol files" >&2
   ls -l *.xml *.h *.c 2>&1
   exit 1
 fi
 
-echo "  [build] cwd=$(pwd)"
-echo "  [build] bridge src: $(ls -1 /tmp/termdeb-mir-bridge.c 2>/dev/null || echo MISSING)"
-echo "  [build] protocol files in cwd:"
-ls -1 wlr-screencopy.h wlr-screencopy.c wlr-virtual-pointer.h wlr-virtual-pointer.c virtual-keyboard.h virtual-keyboard.c 2>&1
-echo "  [build] compiler invokes (relative names):"
-echo "    cc ... wlr-screencopy.c wlr-virtual-pointer.c virtual-keyboard.c"
-echo '  [build] Compiling termdeb-mir-bridge...'
-cc -O2 -pipe -o termdeb-mir-bridge \
-   /tmp/termdeb-mir-bridge.c \
-   wlr-screencopy.c wlr-virtual-pointer.c virtual-keyboard.c \
-   -I. \
-   $(pkg-config --cflags --libs wayland-client xkbcommon)
-strip termdeb-mir-bridge 2>/dev/null || true
+# Build the bridge from a self-contained directory: the generated headers and
+# sources live beside termdeb-mir-bridge.c so the compiler does not need to rely
+# on the current working directory being correct.
+BRIDGE_DIR=$(mktemp -d /tmp/termdeb-mir-bridge-build-XXXXXX)
+cp -f wlr-screencopy.h wlr-screencopy.c    wlr-virtual-pointer.h wlr-virtual-pointer.c    virtual-keyboard.h virtual-keyboard.c    "${BRIDGE_DIR}/"
+cp -f /tmp/termdeb-mir-bridge.c "${BRIDGE_DIR}/termdeb-mir-bridge.c"
 
-install -D -m 0755 termdeb-mir-bridge /usr/local/bin/termdeb-mir-bridge
+echo "  [build] bridge build dir: ${BRIDGE_DIR}"
+echo "  [build] protocol files next to bridge source:"
+ls -1 "${BRIDGE_DIR}/"wlr-screencopy.h "${BRIDGE_DIR}/"wlr-screencopy.c       "${BRIDGE_DIR}/"wlr-virtual-pointer.h "${BRIDGE_DIR}/"wlr-virtual-pointer.c       "${BRIDGE_DIR}/"virtual-keyboard.h "${BRIDGE_DIR}/"virtual-keyboard.c 2>&1
+
+echo '  [build] Compiling termdeb-mir-bridge...'
+cc -O2 -pipe -o "${BRIDGE_DIR}/termdeb-mir-bridge"    "${BRIDGE_DIR}/termdeb-mir-bridge.c"    "${BRIDGE_DIR}/"wlr-screencopy.c    "${BRIDGE_DIR}/"wlr-virtual-pointer.c    "${BRIDGE_DIR}/"virtual-keyboard.c    -I"${BRIDGE_DIR}"    $(pkg-config --cflags --libs wayland-client xkbcommon)
+strip "${BRIDGE_DIR}/termdeb-mir-bridge" 2>/dev/null || true
+
+install -D -m 0755 "${BRIDGE_DIR}/termdeb-mir-bridge" /usr/local/bin/termdeb-mir-bridge
 echo '  [build] Installed /usr/local/bin/termdeb-mir-bridge'
+
+rm -rf "${BRIDGE_DIR}"
 
 # Marker so the runtime can detect a desktop-provisioned rootfs.
 touch /etc/termdeb-desktop-provisioned
