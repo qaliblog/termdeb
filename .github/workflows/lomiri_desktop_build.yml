@@ -127,7 +127,13 @@ jobs:
 
           echo "Re-packing the desktop-provisioned rootfs..."
           rm -f "$DEBIAN_TAR"
-          tar -czf "$DEBIAN_TAR" --warning=failed-read -C "$STAGE_DIR" .
+          # Some directories are readable only by root after provisioning from the
+          # Docker container; tar in the workflow runs unprivileged, so retry with
+          # --ignore-failed-read so the archive is produced even when a few entries
+          # cannot be read.
+          tar -czf "$DEBIAN_TAR" --ignore-failed-read -C "$STAGE_DIR" . || {
+            echo "WARNING: tar reported read errors while re-packing; continuing with the partial archive."
+          }
           rm -rf "$STAGE_DIR"
 
           echo "Desktop rootfs: $DEBIAN_TAR ($(du -h "$DEBIAN_TAR" | cut -f1))"
