@@ -220,6 +220,7 @@ echo '  [build] Compiling termdeb-mir-bridge...'
 cc -O2 -pipe -o termdeb-mir-bridge \
    /tmp/termdeb-mir-bridge.c \
    wlr-screencopy.c wlr-virtual-pointer.c virtual-keyboard.c \
+   -I. \
    $(pkg-config --cflags --libs wayland-client xkbcommon)
 strip termdeb-mir-bridge 2>/dev/null || true
 
