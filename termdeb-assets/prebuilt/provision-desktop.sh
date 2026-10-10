@@ -303,7 +303,16 @@ rm -rf "${STAGE_DIR}"
 
 # ---- Fix permissions --------------------------------------------------------
 echo "  Fixing rootfs permissions..."
-chmod -R a+r "${ROOTFS_DIR}" 2>/dev/null || true
+# Many paths are still root-owned and/or mode 000 after provisioning from the
+# Docker container. The workflow host runs unprivileged and must be able to read
+# and later remove the staged tree, so chmod recursively first. Ignore failures
+# here; a later step will force-walk the tree if needed.
+chmod -R u+rwX "${ROOTFS_DIR}" 2>/dev/null || true
+find "${ROOTFS_DIR}" -type d -exec chmod a+rx {} + 2>/dev/null || true
+chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
+# Make the whole tree deletable by the unprivileged workflow user: force mode
+# changes and (if they exist) any directory-owner mismatches.
+chmod -R u+rwX "${ROOTFS_DIR}" 2>/dev/null || true
 find "${ROOTFS_DIR}" -type d -exec chmod a+rx {} + 2>/dev/null || true
 chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
 

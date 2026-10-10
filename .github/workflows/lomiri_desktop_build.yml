@@ -128,13 +128,29 @@ jobs:
           echo "Re-packing the desktop-provisioned rootfs..."
           rm -f "$DEBIAN_TAR"
           # Some directories are readable only by root after provisioning from the
-          # Docker container; tar in the workflow runs unprivileged, so retry with
-          # --ignore-failed-read so the archive is produced even when a few entries
-          # cannot be read.
+          # Docker container, and some later cleanup runs inside the workflow host
+          # can also trip on mode/owner mismatches. Force the staged tree readable
+          # and deletable by the unprivileged workflow user before repacking and
+          # before trying to remove it below.
+          chmod -R u+rwX "$STAGE_DIR" 2>/dev/null || true
+          find "$STAGE_DIR" -type d -exec chmod a+rx {} + 2>/dev/null || true
+          chmod 1777 "$STAGE_DIR/tmp" 2>/dev/null || true
           tar -czf "$DEBIAN_TAR" --ignore-failed-read -C "$STAGE_DIR" . || {
             echo "WARNING: tar reported read errors while re-packing; continuing with the partial archive."
           }
-          rm -rf "$STAGE_DIR"
+          # Best-effort removal of the staged tree. Several directories/files are
+          # still root-owned/mode-000 after provisioning, so retry with sudo when
+          # available and otherwise force a walk-based removal.
+          rm -rf "$STAGE_DIR" 2>/dev/null || {
+            echo "NOTE: rm -rf could not remove some staged paths as the workflow user;"
+            echo "  retrying with sudo..."
+            sudo rm -rf "$STAGE_DIR" 2>/dev/null || true
+            if [ -d "$STAGE_DIR" ]; then
+              echo "NOTE: sudo rm also incomplete; doing a forced recursive walk..."
+              find "$STAGE_DIR" -depth -exec rm -rf -- {} + 2>/dev/null || true
+              rmdir "$STAGE_DIR" 2>/dev/null || true
+            fi
+          }
 
           echo "Desktop rootfs: $DEBIAN_TAR ($(du -h "$DEBIAN_TAR" | cut -f1))"
 
