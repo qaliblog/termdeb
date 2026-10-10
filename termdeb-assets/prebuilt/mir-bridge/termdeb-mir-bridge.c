@@ -208,7 +208,7 @@ static int connect_input_socket(struct bridge *b, const char *name) {
 
 static void inject_key(struct bridge *b, uint32_t code, uint32_t state) {
     if (!b->keyboard) return;
-    zwp_virtual_keyboard_v1_key(b->keyboard, b->serial, 0, code, state);
+    zwp_virtual_keyboard_v1_key(b->keyboard, b->serial, code, state);
     wl_display_flush(b->display);
 }
 
@@ -487,7 +487,7 @@ static void install_keymap(struct bridge *b) {
         if (m != MAP_FAILED) {
             memcpy(m, str, len);
             munmap(m, len);
-            b->keyboard = zwp_virtual_keyboard_manager_v1_create_keyboard(b->vk_manager, b->seat);
+            b->keyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(b->vk_manager, b->seat);
             zwp_virtual_keyboard_v1_keymap(b->keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)len);
         }
     }
