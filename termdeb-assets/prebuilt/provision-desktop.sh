@@ -10,6 +10,17 @@
 #   <rootfs-dir>        Extracted Debian trixie ARM64 rootfs (already base-provisioned)
 #   <bridge-source-dir> Directory holding termdeb-mir-bridge.c (default: script dir/mir-bridge)
 #
+# Besides the Lomiri/Mir payload this installs:
+#   * the Mir display/rendering platform modules (mir-platform-graphics-virtual,
+#     mir-platform-rendering-egl-generic) - mir-demos/mir_demo_server does not
+#     depend on them, and without them Mir exits before creating a socket;
+#   * a stub Mir input platform (prebuilt/mir-input-stub), because Debian's only
+#     input platform (evdev) needs udev and /dev/input, which the Android guest
+#     has neither of - input arrives over Wayland instead;
+#   * it then starts Mir with the same options the guest session uses and fails
+#     the build when no Wayland socket appears, so a rootfs that cannot bring the
+#     desktop up is never packaged.
+#
 # Requirements:
 #   - Docker with ARM64 QEMU emulation (see provision-rootfs.sh)
 #   - Internet access inside the container
@@ -59,6 +70,17 @@ fi
 STAGE_DIR="$(mktemp -d /tmp/termdeb-desktop-provision-XXXXXX)"
 cp "${BRIDGE_SRC_DIR}/termdeb-mir-bridge.c" "${STAGE_DIR}/"
 
+# Mir input platform stub (built inside the guest) and the linker version-script
+# template it needs; see prebuilt/mir-input-stub/.
+INPUT_STUB_SRC_DIR="${SCRIPT_DIR}/mir-input-stub"
+if [ ! -f "${INPUT_STUB_SRC_DIR}/termdeb-mir-input-stub.cpp" ] || \
+   [ ! -f "${INPUT_STUB_SRC_DIR}/version-script.map.in" ]; then
+  echo "Error: Mir input platform stub sources not found in ${INPUT_STUB_SRC_DIR}" >&2
+  exit 1
+fi
+cp "${INPUT_STUB_SRC_DIR}/termdeb-mir-input-stub.cpp" "${STAGE_DIR}/"
+cp "${INPUT_STUB_SRC_DIR}/version-script.map.in" "${STAGE_DIR}/"
+
 cat > "${STAGE_DIR}/guest-provision.sh" << 'GUEST_EOF'
 #!/bin/bash
 # Runs INSIDE the Debian ARM64 rootfs (chroot) under QEMU emulation.
@@ -105,9 +127,28 @@ if ! apt-get install -y --no-install-recommends lomiri lomiri-desktop-session; t
   echo '  [apt] WARNING: the Lomiri shell package set could not be installed.'
 fi
 
+# Required: the Mir platform modules. Debian trixie ships each Mir platform in its
+# own versioned package (mir-platform-*23) behind a metapackage, and neither
+# lomiri nor mir-demos/mir_demo_server depends on any of them. Without them Mir
+# finds no display platform and dies before it ever creates the Wayland socket:
+#
+#   mir:virtual      -> mir-platform-graphics-virtual
+#   mir:egl-generic  -> mir-platform-rendering-egl-generic
+#   mir:wayland      -> mir-platform-graphics-wayland (nested server on the
+#                       guest's own Wayland socket; used by the shell when it
+#                       runs nested)
+for required_pkg in mir-platform-graphics-virtual mir-platform-rendering-egl-generic mir-platform-graphics-wayland; do
+  if ! apt-get install -y --no-install-recommends "${required_pkg}"; then
+    echo "  [apt] ERROR: required Mir platform package '${required_pkg}' could not be installed" >&2
+    exit 1
+  fi
+done
+
 # Optional: Mir tooling/binaries. Install each name independently because
 # apt-get installs nothing at all when any requested name is unknown.
-for extra_pkg in mir-test-tools mir-demos libmirserver2 libmirplatform2; do
+# The old libmirserver2/libmirplatform2 names do not exist in trixie (they are
+# libmirserver63/libmirplatform30 and are pulled in as dependencies anyway).
+for extra_pkg in mir-test-tools mir-demos; do
   if ! apt-get install -y --no-install-recommends "${extra_pkg}"; then
     echo "  [apt] note: optional package '${extra_pkg}' unavailable; continuing"
   fi
@@ -119,6 +160,16 @@ apt-get install -y --no-install-recommends \
   libwayland-dev libwayland-client0 wayland-protocols \
   libxkbcommon-dev libxkbcommon0 \
   curl ca-certificates
+
+# Mir development headers for the TermDeb input platform stub. Mir resolves the
+# platform entry points with dlvsym(), so the stub must be compiled against the
+# same headers/ABI as the installed server; the headers are build-time only.
+echo '  [apt] Installing Mir development headers for the input platform stub...'
+if ! apt-get install -y --no-install-recommends \
+  g++ libmirserver-dev libmirplatform-dev libmircommon-dev; then
+  echo '  [apt] ERROR: Mir development headers are required to build the input platform stub' >&2
+  exit 1
+fi
 
 for extra_pkg in qtwayland5 fonts-dejavu-core fontconfig dbus-x11; do
   apt-get install -y --no-install-recommends "${extra_pkg}" || true
@@ -247,13 +298,168 @@ echo '  [build] Installed /usr/local/bin/termdeb-mir-bridge'
 
 rm -rf "${BRIDGE_DIR}"
 
+# ---- Mir input platform stub -------------------------------------------------
+# Mir aborts at startup when no input platform is usable:
+#
+#   ERROR: input_probe.cpp(183): No appropriate input platform module found
+#
+# Debian's only input platform (mir-platform-input-evdev10) needs udev and
+# /dev/input, neither of which exists in the Android guest, and the TermDeb bridge
+# injects all input over Wayland (virtual keyboard/pointer). So build a stub
+# platform and install it next to the stock platform modules.
+echo '  [build] Building the TermDeb Mir input platform stub...'
+MIR_PLATFORM_DIR=/usr/lib/aarch64-linux-gnu/mir/server-platform
+mkdir -p "${MIR_PLATFORM_DIR}"
+
+# Mir resolves platform entry points with dlvsym(handle, name, version), where
+# version is Mir's input-platform ABI symbol (e.g. MIR_INPUT_PLATFORM_0.27). That
+# name is not exposed by any installed header, so read it out of the server
+# library that is already installed and stamp it with a linker version script.
+MIR_SERVER_LIB="$(ls /usr/lib/aarch64-linux-gnu/libmirserver.so.* 2>/dev/null | head -1)"
+MIR_INPUT_VERSION_SYMBOL="$(strings -a "${MIR_SERVER_LIB}" 2>/dev/null | grep -xE 'MIR_INPUT_PLATFORM_[0-9.]+' | head -1)"
+if [ -z "${MIR_SERVER_LIB}" ] || [ -z "${MIR_INPUT_VERSION_SYMBOL}" ]; then
+  echo "  [build] ERROR: could not determine Mir's input platform ABI symbol from '${MIR_SERVER_LIB}'" >&2
+  exit 1
+fi
+echo "  [build] Mir input platform ABI symbol: ${MIR_INPUT_VERSION_SYMBOL}"
+
+INPUT_STUB_DIR="$(mktemp -d /tmp/termdeb-mir-input-stub-XXXXXX)"
+cp -f /tmp/termdeb-mir-input-stub.cpp "${INPUT_STUB_DIR}/termdeb-mir-input-stub.cpp"
+sed "s/@PLATFORM_VERSION_SYMBOL@/${MIR_INPUT_VERSION_SYMBOL}/" /tmp/version-script.map.in \
+  > "${INPUT_STUB_DIR}/version-script.map"
+if ! grep -q "^${MIR_INPUT_VERSION_SYMBOL} {" "${INPUT_STUB_DIR}/version-script.map"; then
+  echo '  [build] ERROR: the generated version script is malformed:' >&2
+  cat "${INPUT_STUB_DIR}/version-script.map" >&2
+  exit 1
+fi
+
+g++ -O2 -fPIC -shared -std=c++20 -Wall \
+  -o "${INPUT_STUB_DIR}/input-termdeb-stub.so" \
+  "${INPUT_STUB_DIR}/termdeb-mir-input-stub.cpp" \
+  -I/usr/include/mirplatform -I/usr/include/mircommon -I/usr/include/mirserver -I/usr/include/mircore \
+  -Wl,--version-script="${INPUT_STUB_DIR}/version-script.map"
+
+# The server only detects a module that exports its entry points under the ABI
+# version symbol; a module without them loads but is never listed.
+if ! nm -D --defined-only "${INPUT_STUB_DIR}/input-termdeb-stub.so" \
+     | grep -q "create_input_platform@@${MIR_INPUT_VERSION_SYMBOL}"; then
+  echo '  [build] ERROR: the input platform stub is missing its versioned entry points:' >&2
+  nm -D --defined-only "${INPUT_STUB_DIR}/input-termdeb-stub.so" >&2
+  exit 1
+fi
+
+install -D -m 0755 "${INPUT_STUB_DIR}/input-termdeb-stub.so" "${MIR_PLATFORM_DIR}/input-termdeb-stub.so"
+rm -rf "${INPUT_STUB_DIR}"
+echo '  [build] Installed the Mir input platform stub (termdeb:input-stub)'
+
 # Marker so the runtime can detect a desktop-provisioned rootfs.
 touch /etc/termdeb-desktop-provisioned
 
-echo '  [apt] Installed desktop packages:'
-dpkg-query -W -f='    - %{Package} (%{Version})\n' lomiri mir-demos mir-test-tools 2>/dev/null || true
+# ---- Mir smoke test ----------------------------------------------------------
+# Start Mir exactly the way termdeb-assets/config/termdeb-desktop-session does and
+# require the Wayland socket to appear. Keep these options in sync with the
+# session script: the desktop previously shipped a rootfs whose Mir died during
+# startup ("Unknown command line options: --host-socket", missing platform
+# modules, no input platform) and the guest session then aborted with
+# "Mir did not create the Wayland socket".
+echo ''
+echo '  [smoke] Starting Mir with the desktop session options...'
+SMOKE_DIR="$(mktemp -d /tmp/termdeb-mir-smoke-XXXXXX)"
+export XDG_RUNTIME_DIR="${SMOKE_DIR}/runtime"
+mkdir -p "${XDG_RUNTIME_DIR}"
+SMOKE_WIDTH=1280
+SMOKE_HEIGHT=800
+SMOKE_STATUS=0
 
-rm -f /tmp/termdeb-mir-bridge.c
+mir_demo_server \
+  --platform-display-libs mir:virtual \
+  --platform-rendering-libs mir:egl-generic \
+  --platform-input-lib termdeb:input-stub \
+  --virtual-output "${SMOKE_WIDTH}x${SMOKE_HEIGHT}" \
+  --console-provider none \
+  --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1:zwp_virtual_keyboard_manager_v1:zwlr_virtual_pointer_manager_v1:zwlr_screencopy_manager_v1" \
+  >"${SMOKE_DIR}/mir.log" 2>&1 &
+SMOKE_MIR=$!
+
+SMOKE_SOCKET=""
+for _ in $(seq 1 60); do
+  for _sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
+    if [ -S "${_sock}" ]; then SMOKE_SOCKET="${_sock}"; break; fi
+  done
+  [ -n "${SMOKE_SOCKET}" ] && break
+  if ! kill -0 "${SMOKE_MIR}" 2>/dev/null; then break; fi
+  sleep 0.5
+done
+
+if [ -n "${SMOKE_SOCKET}" ] && [ -S "${SMOKE_SOCKET}" ]; then
+  echo "  [smoke] OK  Wayland socket created: ${SMOKE_SOCKET}"
+else
+  echo '  [smoke] FAIL Mir did not create a Wayland socket' >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -q 'Selected input driver: termdeb:input-stub' "${SMOKE_DIR}/mir.log"; then
+  echo '  [smoke] OK  Mir selected the TermDeb input platform stub'
+else
+  echo '  [smoke] FAIL Mir did not use termdeb:input-stub' >&2
+  SMOKE_STATUS=1
+fi
+
+if grep -q 'Initial display configuration' "${SMOKE_DIR}/mir.log"; then
+  echo '  [smoke] OK  Mir configured the virtual display'
+else
+  echo '  [smoke] FAIL Mir did not configure the virtual display' >&2
+  SMOKE_STATUS=1
+fi
+
+# Bridge: prove the display path end to end. The bridge must connect to Mir and
+# Mir must hand it a screencopy buffer; frame content needs a drawing client
+# (Lomiri), so "no frames yet" is reported, not failed.
+SMOKE_FB="${SMOKE_DIR}/fb.buf"
+: > "${SMOKE_FB}"
+if [ -n "${SMOKE_SOCKET}" ]; then
+  WAYLAND_DISPLAY="$(basename "${SMOKE_SOCKET}")" WAYLAND_DEBUG=1 \
+    timeout 8 /usr/local/bin/termdeb-mir-bridge \
+      --fb "${SMOKE_FB}" \
+      --input-socket termdeb-desktop-input \
+      --width "${SMOKE_WIDTH}" --height "${SMOKE_HEIGHT}" \
+      >"${SMOKE_DIR}/bridge.log" 2>&1 || true
+  if grep -q 'bridge running' "${SMOKE_DIR}/bridge.log"; then
+    echo '  [smoke] OK  termdeb-mir-bridge connected to Mir'
+  else
+    echo '  [smoke] FAIL termdeb-mir-bridge could not run against Mir' >&2
+    tail -n 10 "${SMOKE_DIR}/bridge.log" >&2
+    SMOKE_STATUS=1
+  fi
+  if grep -q 'zwlr_screencopy_frame_v1.*buffer(' "${SMOKE_DIR}/bridge.log"; then
+    echo '  [smoke] OK  Mir answered the screencopy capture request'
+  else
+    echo '  [smoke] FAIL Mir did not answer the screencopy capture request' >&2
+    SMOKE_STATUS=1
+  fi
+  # Frame counter at byte offset 24 of the shared-framebuffer header.
+  SMOKE_SEQ="$(dd if="${SMOKE_FB}" bs=4 skip=6 count=1 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n')"
+  echo "  [smoke] note: frames copied to the shared framebuffer: ${SMOKE_SEQ:-unknown} (no drawing client in the container)"
+fi
+
+kill "${SMOKE_MIR}" 2>/dev/null || true
+sleep 1
+
+if [ "${SMOKE_STATUS}" -ne 0 ]; then
+  echo ''
+  echo '  [smoke] --- mir.log ---' >&2
+  tail -n 40 "${SMOKE_DIR}/mir.log" >&2 || true
+  rm -rf "${SMOKE_DIR}"
+  echo '  [smoke] FAILED: the provisioned rootfs cannot bring the Mir desktop up.' >&2
+  exit 1
+fi
+rm -rf "${SMOKE_DIR}"
+echo '  [smoke] Mir desktop smoke test passed'
+
+echo '  [apt] Installed desktop packages:'
+dpkg-query -W -f='    - %{Package} (%{Version})\n' lomiri mir-demos mir-test-tools mir-platform-graphics-virtual mir-platform-rendering-egl-generic 2>/dev/null || true
+
+rm -f /tmp/termdeb-mir-bridge.c /tmp/termdeb-mir-input-stub.cpp /tmp/version-script.map.in
 rm -rf /tmp/bridge
 GUEST_EOF
 
@@ -278,13 +484,17 @@ chmod 1777 /rootfs/tmp
 mount --bind /dev /rootfs/dev 2>/dev/null || true
 
 cp /bridge/termdeb-mir-bridge.c /rootfs/tmp/termdeb-mir-bridge.c
+cp /bridge/termdeb-mir-input-stub.cpp /rootfs/tmp/termdeb-mir-input-stub.cpp
+cp /bridge/version-script.map.in /rootfs/tmp/version-script.map.in
 cp /bridge/guest-provision.sh /rootfs/tmp/termdeb-guest-provision.sh
 chmod 755 /rootfs/tmp/termdeb-guest-provision.sh
 
 chroot /rootfs /bin/bash /tmp/termdeb-guest-provision.sh
 
 umount /rootfs/dev 2>/dev/null || true
-rm -f /rootfs/etc/resolv.conf /rootfs/tmp/termdeb-guest-provision.sh
+rm -f /rootfs/etc/resolv.conf /rootfs/tmp/termdeb-guest-provision.sh \
+  /rootfs/tmp/termdeb-mir-input-stub.cpp /rootfs/tmp/version-script.map.in \
+  /rootfs/tmp/termdeb-mir-bridge.c
 echo "  [docker] Desktop provisioning complete."
 OUTER_EOF
 
@@ -344,6 +554,39 @@ done
 if [ "${LOMIRI_FOUND}" -eq 0 ]; then
   echo "  FAIL no Lomiri/Mir binaries found in the rootfs" >&2
   STATUS=1
+fi
+
+# Mir platform modules and the TermDeb input platform stub. Mir resolves the
+# module names below from these files at startup; a rootfs without them starts
+# no compositor ("Failed to load platform" / "No appropriate input platform
+# module found") and the guest session aborts before the Wayland socket exists.
+MIR_PLATFORM_DIR="${ROOTFS_DIR}/usr/lib/aarch64-linux-gnu/mir/server-platform"
+check_glob() {
+  local pattern="$1" label="$2"
+  # shellcheck disable=SC2086
+  if compgen -G "${pattern}" >/dev/null 2>&1; then
+    echo "  OK  ${label}: $(basename "$(compgen -G "${pattern}" | head -1)")"
+  else
+    echo "  FAIL ${label} missing (expected ${pattern})" >&2
+    STATUS=1
+  fi
+}
+check_glob "${MIR_PLATFORM_DIR}/server-virtual.so.*" "Mir virtual display platform (mir:virtual)"
+check_glob "${MIR_PLATFORM_DIR}/renderer-egl-generic.so.*" "Mir egl-generic rendering platform (mir:egl-generic)"
+check_glob "${MIR_PLATFORM_DIR}/input-termdeb-stub.so" "TermDeb Mir input platform stub (termdeb:input-stub)"
+
+if [ -e "${MIR_PLATFORM_DIR}/input-termdeb-stub.so" ]; then
+  if command -v nm >/dev/null 2>&1; then
+    if nm -D --defined-only "${MIR_PLATFORM_DIR}/input-termdeb-stub.so" 2>/dev/null \
+       | grep -q 'create_input_platform@@MIR_INPUT_PLATFORM_'; then
+      echo '  OK  input stub exports its ABI-versioned entry points'
+    else
+      echo '  FAIL input stub does not export versioned entry points (Mir would ignore it)' >&2
+      STATUS=1
+    fi
+  else
+    echo '  note: nm unavailable; skipping the input stub symbol check'
+  fi
 fi
 
 if [ "${STATUS}" -ne 0 ]; then

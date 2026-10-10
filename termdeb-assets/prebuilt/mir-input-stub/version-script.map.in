@@ -1,0 +1,25 @@
+/*
+ * Linker version script for the TermDeb Mir input platform stub.
+ *
+ * Mir loads platform entry points with dlvsym(handle, symbol, version), where
+ * version is Mir's input-platform ABI version (MIR_SERVER_INPUT_PLATFORM_VERSION,
+ * e.g. "MIR_INPUT_PLATFORM_0.27"). A plain exported symbol is not enough: the
+ * module loads, but Mir never detects it and aborts with "Failed to find the
+ * requested platform module".
+ *
+ * The version string is not exposed by any installed header, so
+ * termdeb-assets/prebuilt/provision-desktop.sh discovers it from libmirserver
+ * and replaces @PLATFORM_VERSION_SYMBOL@ below before compiling.
+ *
+ * Keep the symbol list in sync with the extern "C" entry points in
+ * termdeb-mir-input-stub.cpp (declared in mir/input/platform.h).
+ */
+@PLATFORM_VERSION_SYMBOL@ {
+    global:
+        create_input_platform;
+        describe_input_module;
+        probe_input_platform;
+        add_input_platform_options;
+    local:
+        *;
+};

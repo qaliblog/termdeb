@@ -33,6 +33,23 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/termdeb/runtime}"
 mkdir -p "${XDG_RUNTIME_DIR}" "${XDG_RUNTIME_DIR}/pulse"
 chmod 700 "${XDG_RUNTIME_DIR}" 2>/dev/null || true
 
+# ---- Session D-Bus ----------------------------------------------------------
+# The Lomiri shell and its session helpers talk to a session bus; without one the
+# shell's session setup floods its log with
+#   dbus-update-activation-environment: error: unable to connect to D-Bus
+# and never finishes starting. The Android guest has no login session, so start a
+# bus of our own unless the app already provided one.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2>&1; then
+  _bus_addr="$(dbus-daemon --session --fork --print-address=1 \
+    --address="unix:path=${XDG_RUNTIME_DIR}/bus" 2>/dev/null || true)"
+  if [ -n "${_bus_addr}" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="${_bus_addr}"
+    log "Session bus started at ${XDG_RUNTIME_DIR}/bus"
+  else
+    log "WARNING: could not start a session D-Bus; the shell may fail to start"
+  fi
+fi
+
 # ---- Desktop geometry -------------------------------------------------------
 # The Android app preallocates the shared framebuffer and publishes the desktop
 # size in its header (width at byte 8, height at byte 12, little-endian).
@@ -64,13 +81,32 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-MIR_SOCKET_NAME="termdeb-mir"
+# Mir creates the socket itself, named after Miral's default (wayland-0). Do not
+# pass --host-socket: that option exists in Mir 1.x only, and Mir 2.20 (Debian
+# trixie) rejects the whole invocation with
+#   Unknown command line options: --virtual-output ... --host-socket ...
+# which is what made the server die before it ever created a socket.
+
+# The guest has no usable native input platform:
+#   * Debian's only input platform module is evdev (mir-platform-input-evdev10),
+#     which needs udev and /dev/input - neither exists in the Android guest;
+#   * all input arrives over Wayland from the app (virtual keyboard/pointer).
+# provision-desktop.sh therefore builds a stub input platform
+# (termdeb-assets/prebuilt/mir-input-stub) and this is the name it registers.
+MIR_INPUT_LIB="termdeb:input-stub"
 
 # ---- 1. Mir compositor (virtual output, software rendering) ------------------
 #
-# Mir's "virtual" display platform provides an offscreen output; the
-# "egl-generic" rendering platform keeps everything on llvmpipe so no DRM/GPU
-# device is required inside proot.
+# Mir's "virtual" display platform provides an offscreen output sized by its own
+# --virtual-output option; the "egl-generic" rendering platform keeps everything
+# on llvmpipe so no DRM/GPU device is required inside proot. Both platform
+# modules have to be installed in the rootfs (mir-platform-graphics-virtual and
+# mir-platform-rendering-egl-generic): without them Mir aborts with
+# "Failed to load platform", and without --platform-input-lib it aborts with
+# "No appropriate input platform module found".
+#
+# Keep these options in sync with the smoke test in
+# termdeb-assets/prebuilt/provision-desktop.sh.
 MIR_BIN=""
 for candidate in mir_demo_server miral-shell lomiri-system-compositor; do
   if command -v "${candidate}" >/dev/null 2>&1; then MIR_BIN="${candidate}"; break; fi
@@ -88,10 +124,10 @@ case "${MIR_BIN}" in
     "${MIR_BIN}" \
       --platform-display-libs mir:virtual \
       --platform-rendering-libs mir:egl-generic \
+      --platform-input-lib "${MIR_INPUT_LIB}" \
       --virtual-output "${WIDTH}x${HEIGHT}" \
       --console-provider none \
-      --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1" \
-      --host-socket "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" \
+      --wayland-extensions "wl_shell:xdg_wm_base:zwlr_layer_shell_v1:zxdg_output_manager_v1:zwp_virtual_keyboard_manager_v1:zwlr_virtual_pointer_manager_v1:zwlr_screencopy_manager_v1" \
       >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
     MIR_PID=$!
     ;;
@@ -101,27 +137,40 @@ case "${MIR_BIN}" in
     "${MIR_BIN}" \
       --platform-display-libs mir:virtual \
       --platform-rendering-libs mir:egl-generic \
+      --platform-input-lib "${MIR_INPUT_LIB}" \
       --virtual-output "${WIDTH}x${HEIGHT}" \
       --console-provider none \
-      --host-socket "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" \
       >"${XDG_RUNTIME_DIR}/mir.log" 2>&1 &
     MIR_PID=$!
     ;;
 esac
 
-export WAYLAND_DISPLAY="${MIR_SOCKET_NAME}"
-export MIR_SOCKET="${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}"
-
-# Wait for the Wayland socket to appear (up to 20s).
+# Wait for the Wayland socket Mir actually creates (up to 20s) instead of
+# assuming a name: Miral names it wayland-0 unless configured otherwise.
+MIR_SOCKET=""
 for _ in $(seq 1 40); do
-  [ -S "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" ] && break
+  for _sock in "${XDG_RUNTIME_DIR}"/wayland-*; do
+    if [ -S "${_sock}" ]; then MIR_SOCKET="${_sock}"; break; fi
+  done
+  [ -n "${MIR_SOCKET}" ] && break
+  if ! kill -0 "${MIR_PID}" 2>/dev/null; then
+    log "ERROR: the Mir compositor (${MIR_BIN}) exited during startup."
+    log "--- ${XDG_RUNTIME_DIR}/mir.log ---"
+    tail -n 20 "${XDG_RUNTIME_DIR}/mir.log" 2>/dev/null || true
+    exit 1
+  fi
   sleep 0.5
 done
-if [ ! -S "${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}" ]; then
-  log "ERROR: Mir did not create the Wayland socket at ${XDG_RUNTIME_DIR}/${MIR_SOCKET_NAME}."
-  log "See ${XDG_RUNTIME_DIR}/mir.log"
+if [ -z "${MIR_SOCKET}" ] || [ ! -S "${MIR_SOCKET}" ]; then
+  log "ERROR: Mir did not create a Wayland socket in ${XDG_RUNTIME_DIR}."
+  log "--- ${XDG_RUNTIME_DIR}/mir.log ---"
+  tail -n 20 "${XDG_RUNTIME_DIR}/mir.log" 2>/dev/null || true
   exit 1
 fi
+
+# Wayland clients (Lomiri, the bridge) resolve the socket through WAYLAND_DISPLAY.
+export WAYLAND_DISPLAY="$(basename "${MIR_SOCKET}")"
+export MIR_SOCKET="${MIR_SOCKET}"
 log "Mir is up (${MIR_SOCKET})."
 
 # ---- 2. Lomiri shell --------------------------------------------------------
@@ -131,8 +180,12 @@ export GDK_BACKEND=wayland
 # Keep Qt from trying to reach the (absent) host system bus.
 export QT_LOGGING_RULES="${QT_LOGGING_RULES:-qt.qpa.*=false}"
 
+# Prefer the distribution's session entry point: lomiri-session sets the shell's
+# environment itself (QT_QPA_PLATFORM=wayland, WAYLAND_DISPLAY=wayland-0, IM
+# modules, --mode=full-shell) and clears MIR_SERVER_HOST_SOCKET/DISPLAY so the
+# shell does not try to nest on a stale session.
 LOMIRI_BIN=""
-for candidate in lomiri lomiri-system-compositor dm-lomiri-session; do
+for candidate in lomiri-session lomiri lomiri-system-compositor; do
   if command -v "${candidate}" >/dev/null 2>&1; then LOMIRI_BIN="${candidate}"; break; fi
 done
 

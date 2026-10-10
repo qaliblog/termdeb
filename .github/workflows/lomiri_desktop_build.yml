@@ -229,6 +229,22 @@ jobs:
               echo "  rootfs Lomiri/Mir binaries: FAIL (missing)"
               ERRORS=$((ERRORS + 1))
             fi
+
+            # Mir's platform modules and the input platform stub. Without the display
+            # platform Mir exits before creating the Wayland socket, and without an
+            # input platform it aborts with "No appropriate input platform module
+            # found"; the guest session then fails to start the desktop.
+            for CHECK in \
+              'usr/lib/aarch64-linux-gnu/mir/server-platform/server-virtual\.so\.' \
+              'usr/lib/aarch64-linux-gnu/mir/server-platform/renderer-egl-generic\.so\.' \
+              'usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub\.so'; do
+              if echo "$ROOTFS_LIST" | grep -qE "^(\./)?${CHECK}"; then
+                echo "  rootfs ${CHECK}: PASS"
+              else
+                echo "  rootfs ${CHECK}: FAIL (missing)"
+                ERRORS=$((ERRORS + 1))
+              fi
+            done
           else
             echo "  rootfs: FAIL (no Debian rootfs asset)"
             ERRORS=$((ERRORS + 1))

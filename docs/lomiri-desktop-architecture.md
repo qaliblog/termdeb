@@ -119,16 +119,55 @@ rm -f "$DEBIAN_TAR"; tar -czf "$DEBIAN_TAR" -C "$STAGE" .
 | `$PREFIX/bin/termdeb-desktop` | Host entry point; enters Debian and starts the session. |
 | guest `/usr/local/bin/termdeb-desktop-session` | Brings up Mir, Lomiri and the bridge. |
 | guest `/usr/local/bin/termdeb-mir-bridge` | Captures Mir frames and injects input. |
+| guest `.../mir/server-platform/input-termdeb-stub.so` | Mir input platform (`termdeb:input-stub`). |
 | `files/termdeb-desktop/fb.buf` | Shared framebuffer (bind-mounted to `/run/termdeb`). |
 | abstract `termdeb-desktop-input` | Input socket owned by the app. |
 
+## Guest requirements the session depends on
+
+Mir 2.20 in Debian trixie splits its platforms into per-platform packages and
+`mir-demos`/`mir_demo_server` depends on none of them, so provisioning installs
+them explicitly (see `provision-desktop.sh`):
+
+| Mir name | Package | Module file |
+| --- | --- | --- |
+| `mir:virtual` (offscreen output) | `mir-platform-graphics-virtual` | `server-virtual.so.*` |
+| `mir:egl-generic` (software rendering) | `mir-platform-rendering-egl-generic` | `renderer-egl-generic.so.*` |
+| `mir:wayland` (nested server) | `mir-platform-graphics-wayland` | `graphics-wayland.so.*` |
+| `termdeb:input-stub` | built at provisioning time | `input-termdeb-stub.so` |
+
+The input platform is ours because the guest has no usable stock one: Debian's
+only input platform (`mir-platform-input-evdev10`) needs udev and `/dev/input`,
+and the bridge injects all input over Wayland anyway. Mir resolves platform entry
+points with `dlvsym()` under an ABI version symbol (e.g.
+`MIR_INPUT_PLATFORM_0.27`); the stub gets it through a generated linker version
+script, otherwise Mir loads the module but never detects it.
+
+Other session-level requirements:
+
+* **Mir's Wayland socket name is not configurable** in Mir 2.20 - `--host-socket`
+is a Mir 1.x option and is rejected. Mir creates `$XDG_RUNTIME_DIR/wayland-0`, and
+the session detects the socket instead of assuming a name.
+* **A session D-Bus** must exist before the shell starts; the session script
+starts one at `$XDG_RUNTIME_DIR/bus` when the app has not provided one.
+
 ## Known limitations / validation status
 
-The desktop session depends on the exact packaging of Lomiri and Mir in Debian
-trixie. The compositor invocation in `termdeb-desktop-session` prefers
-`mir_demo_server`/`miral-shell` (which accept the `mir:virtual` and
-`mir:egl-generic` platform options) and falls back to
-`lomiri-system-compositor`. If the packaged binaries expose different options,
-adjust the session script accordingly. Device bring-up (first-frame latency,
-input calibration, and which Lomiri shell entry point is present in the rootfs)
-must be validated on a real ARM64 device.
+Verified against the ARM64 rootfs binaries (no device): Mir starts on
+`mir:virtual` + `mir:egl-generic` + `termdeb:input-stub`, creates
+`wayland-0`, serves clients, and `termdeb-mir-bridge` binds wlr-screencopy and
+receives frame buffers. `provision-desktop.sh` runs this same sequence as a
+smoke test and fails the build if the socket never appears.
+
+Open item - the Lomiri shell itself: Debian's `lomiri` binary always uses qtmir's
+`mirserver` QPA plugin and probes *device* display platforms, so it exits with
+`Failed to find any platforms for current system` and ignores both
+`QT_QPA_PLATFORM=wayland` and `MIR_SERVER_HOST_SOCKET`. Until that is solved the
+Lomiri shell does not attach to the TermDeb Mir server (the bridge then captures
+an empty virtual output). Candidate approaches: run the shell nested on the
+guest's Wayland socket via a qtmir build/patch that honours the nested Wayland
+display platform, or ship a `lomiri-system-compositor`-based session.
+
+Device bring-up (first-frame latency, input calibration, and which Lomiri shell
+entry point the packaged rootfs actually supports) still needs validation on a
+real ARM64 device.
