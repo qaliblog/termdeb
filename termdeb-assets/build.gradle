@@ -359,8 +359,13 @@ task prepareTermDebAssets {
                         logger.quiet("  [debian] Re-tarring provisioned rootfs...")
                         def provisionedTar = new File(termdebBuildDir, 'debian-trixie-arm64-provisioned.tar.gz')
                         if (provisionedTar.exists()) provisionedTar.delete()
+                        // --ignore-failed-read so a handful of root-owned lock/cache files
+                        // left by Docker (var/lib/apt/lists/lock, var/cache/ldconfig/aux-cache,
+                        // ...) cannot abort the pack and silently downgrade the shipped rootfs
+                        // to the un-provisioned fallback. provision-rootfs.sh makes the tree
+                        // readable first, so files should only be skipped if that failed.
                         if (!execCommand("Pack provisioned rootfs",
-                            "sh", "-c", "tar -czf ${provisionedTar.absolutePath} --warning=failed-read -C ${provisionStaging.absolutePath} .")) {
+                            "sh", "-c", "tar -czf ${provisionedTar.absolutePath} --ignore-failed-read -C ${provisionStaging.absolutePath} .")) {
                             throw new GradleException("Failed to re-tar provisioned rootfs")
                         }
 

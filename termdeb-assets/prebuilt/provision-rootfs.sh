@@ -311,10 +311,26 @@ rm -f "${PROVISION_INNER}"
 # After Docker runs as root inside the container, many files end up owned
 # by root:root with restricted permissions. Fix them so the build can
 # tar the rootfs and so the app can read/write everything.
+# Files written by apt/dpkg/locale-gen inside the container (var/lib/apt/lists/lock,
+# var/cache/apt/archives/lock, var/cache/ldconfig/aux-cache, ...) are root-owned and
+# unreadable by the unprivileged build user, so a plain chmod fails with
+# "Operation not permitted" and packing the rootfs later aborts with
+#   tar: ./var/lib/apt/lists/lock: Cannot open: Permission denied
+# prepareTermDebAssets then silently fell back to the *un-provisioned* rootfs, so the
+# APK shipped a rootfs without systemd/dbus/ca-certificates/locales and every install
+# had to apt-get provision at first launch. Use sudo when the host grants it
+# (GitHub-hosted runners do); otherwise fall back to the plain chmod.
 echo "  Fixing rootfs permissions..."
-chmod -R a+r "${ROOTFS_DIR}" 2>/dev/null || true
-find "${ROOTFS_DIR}" -type d -exec chmod a+rx {} + 2>/dev/null || true
-chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
+if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+  echo "  [perm] making the root-owned rootfs tree readable (sudo)"
+  sudo chmod -R a+rX "${ROOTFS_DIR}" 2>/dev/null || true
+  sudo chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
+else
+  echo "  [perm] no passwordless sudo; chmod as the build user"
+  chmod -R a+rX "${ROOTFS_DIR}" 2>/dev/null || true
+  find "${ROOTFS_DIR}" -type d -exec chmod a+rx {} + 2>/dev/null || true
+  chmod 1777 "${ROOTFS_DIR}/tmp" 2>/dev/null || true
+fi
 
 # ---- Verify provisioning ----
 echo ""

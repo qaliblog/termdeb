@@ -128,13 +128,23 @@ jobs:
           echo "Re-packing the desktop-provisioned rootfs..."
           rm -f "$DEBIAN_TAR"
           # Some directories are readable only by root after provisioning from the
-          # Docker container, and some later cleanup runs inside the workflow host
-          # can also trip on mode/owner mismatches. Force the staged tree readable
-          # and deletable by the unprivileged workflow user before repacking and
-          # before trying to remove it below.
-          chmod -R u+rwX "$STAGE_DIR" 2>/dev/null || true
-          find "$STAGE_DIR" -type d -exec chmod a+rx {} + 2>/dev/null || true
-          chmod 1777 "$STAGE_DIR/tmp" 2>/dev/null || true
+          # Docker container (apt/dpkg lock files, ldconfig cache), and some later
+          # cleanup runs inside the workflow host can also trip on mode/owner
+          # mismatches. Force the staged tree readable and deletable by the
+          # unprivileged workflow user before repacking and before trying to remove
+          # it below. Prefer sudo so the tree is complete: a plain chmod cannot
+          # touch root-owned files, and the repacked rootfs would then be missing
+          # the paths tar could not read.
+          if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+            echo "  making the staged rootfs readable (sudo)"
+            sudo chmod -R a+rX "$STAGE_DIR" 2>/dev/null || true
+            sudo chmod 1777 "$STAGE_DIR/tmp" 2>/dev/null || true
+          else
+            echo "  no passwordless sudo; chmod as the workflow user"
+            chmod -R u+rwX "$STAGE_DIR" 2>/dev/null || true
+            find "$STAGE_DIR" -type d -exec chmod a+rx {} + 2>/dev/null || true
+            chmod 1777 "$STAGE_DIR/tmp" 2>/dev/null || true
+          fi
           tar -czf "$DEBIAN_TAR" --ignore-failed-read -C "$STAGE_DIR" . || {
             echo "WARNING: tar reported read errors while re-packing; continuing with the partial archive."
           }
