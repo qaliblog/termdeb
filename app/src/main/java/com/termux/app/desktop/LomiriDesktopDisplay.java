@@ -170,7 +170,9 @@ public final class LomiriDesktopDisplay {
         if (mHeader == null) return STATE_STARTING;
         int flags = mHeader.getInt(28);
         if ((flags & FLAG_PRODUCER_ERROR) != 0) return STATE_ERROR;
-        if (mLastSeq > 0) return STATE_STREAMING;
+        /* The producer's own frame counter, not ours: "streaming" means the guest is
+           delivering frames, whether or not this side managed to present them. */
+        if (mHeader.getInt(24) > 0) return STATE_STREAMING;
         if ((flags & FLAG_PRODUCER_STALLED) != 0) return STATE_STALLED;
         return STATE_STARTING;
     }

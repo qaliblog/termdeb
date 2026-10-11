@@ -105,8 +105,9 @@ public final class LomiriDesktopView extends SurfaceView implements SurfaceHolde
             Bitmap frame = display != null ? display.pollFrame() : null;
 
             if (frame != null) {
-                presentFrame(frame, dest);
-                lastNotice = 0;
+                // A frame the guest produced is shown until the next one arrives, so
+                // there is nothing to explain unless presenting it failed.
+                if (presentFrame(frame, dest)) lastNotice = 0;
             } else if (display != null) {
                 long now = SystemClock.elapsedRealtime();
                 if (now - started >= NOTICE_DELAY_MS
@@ -125,20 +126,24 @@ public final class LomiriDesktopView extends SurfaceView implements SurfaceHolde
         }
     }
 
-    private void presentFrame(@NonNull Bitmap frame, @NonNull Rect dest) {
+    /** @return true when the frame reached the surface. */
+    private boolean presentFrame(@NonNull Bitmap frame, @NonNull Rect dest) {
         Canvas canvas = null;
+        boolean presented = false;
         try {
             canvas = mHolder.lockCanvas();
             if (canvas != null) {
                 canvas.drawColor(Color.BLACK);
                 computeDestination(canvas, frame, dest);
                 canvas.drawBitmap(frame, null, dest, null);
+                presented = true;
             }
         } catch (RuntimeException e) {
             Log.w(LOG_TAG, "Frame present failed", e);
         } finally {
             unlock(canvas);
         }
+        return presented;
     }
 
     /**
@@ -188,6 +193,11 @@ public final class LomiriDesktopView extends SurfaceView implements SurfaceHolde
             lines.add("TermDeb desktop: the compositor is not producing frames.");
             lines.addAll(wrap(display.getProducerReason(), maxWidth));
             lines.add("Details are in the desktop session log and runtime/bridge.log.");
+            return lines;
+        }
+        if (state == LomiriDesktopDisplay.STATE_STREAMING) {
+            lines.add("The guest is rendering, but this view has not shown a frame yet.");
+            lines.add("Check the app log (LomiriDesktopDisplay) for the frame copy failure.");
             return lines;
         }
         lines.add("TermDeb desktop is starting (" + seconds + "s)...");
