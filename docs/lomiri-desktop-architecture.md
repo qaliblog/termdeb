@@ -261,12 +261,22 @@ list (the shell logs `Invalid session path`), and no systemd user session, so th
 indicators and apps have to be started by hand. The shell only accepts a client it
 can identify, which it does by reading the client's `/proc/<pid>/cmdline` and its
 environment for `APP_ID` - the guest has `/proc` bind-mounted by `termdeb-desktop`
-for exactly that reason. That authorisation step could not be exercised in the
-verification sandbox (its `/proc` denies `cmdline` reads, so the shell rejects the
-app with `unable to read the process command line`), so whether the app window
-appears is a **device** check: the session log says
+for exactly that reason.
+
+That authorisation step cannot be exercised in the local verification sandbox (its
+`/proc` denies `cmdline` reads, so the shell rejects the app with `unable to read
+the process command line`), but the provisioning smoke test runs the real session
+in a container that has `/proc`, and it reports both halves:
+
+```
+[smoke] note: the session started the panel indicator (clock)
+[smoke] note: the desktop application was accepted by the shell (window on the desktop)
+```
+
+So with `APP_ID` set and `/proc` readable, the shell hosts the application as a
+window on the desktop. When it does not, the session log says so itself:
 `WARNING: the desktop application (lomiri-terminal-app) exited; the desktop has no
-window` with the app's log when it does not.
+window`, followed by the app's own log.
 
 Practical consequence: **"frames are flowing but the Android screen looks blank"
 is this state, not a bridge or app fault.** The session script says so in its own
@@ -361,10 +371,13 @@ Still not yet validated on a real device:
   session-less shell (see "The shell has no session"). A real login needs those
   services; `lomiri-app-launch` app launching additionally needs a systemd user
   session.
-* App hosting: the shell's `SessionAuthorizer` reads `/proc/<pid>/cmdline` and the
-  client's `APP_ID` before accepting a window. That could not be exercised here
-  (the sandbox denies `/proc` cmdline reads), so the app window path is
-  device-verified only by the session script's own report.
+* App hosting: verified by the provisioning smoke test (see "The shell has no
+  session"): with `/proc` readable and `APP_ID` set, the shell accepts the app as a
+  window. The local sandbox cannot reach that step, because its `/proc` denies
+  `cmdline` reads. Still unverified on a real device, where proot binds `/proc`.
+* App launching from the launcher: `lomiri-app-launch` resolves app ids and starts
+  apps through systemd user units, which this guest does not run, so the launcher's
+  app grid stays empty and the session starts its one application directly.
 * The app launch path: apps launched by the shell talk to the nested server through
   `WAYLAND_DISPLAY`; the session publishes that variable, but the launch path
   (`lomiri-app-launch`, which in the guest has no systemd user session) has not
