@@ -234,7 +234,15 @@ guest session script end to end in a chroot on an aarch64 host:
   structure visible. A known-colour test client was captured correctly, i.e. the
   frame is neither vertically flipped nor colour-channel swapped.
 * `provision-desktop.sh` runs the *same* session script as its smoke test and
-  fails the build unless non-black desktop pixels reach the shared framebuffer.
+  fails the build unless non-black desktop pixels reach the shared framebuffer,
+  the bridge reports no capture error, and the session reports frames reaching
+  the framebuffer;
+* the capture watchdog was exercised by forcing the timeout down
+  (`TERMDEB_DESKTOP_CAPTURE_TIMEOUT_MS=1` and `=20`): the bridge abandoned
+  unanswered requests, re-attached to the compositor over a thousand times
+  without a crash or a leaked frame mapping, marked the stalled state, and still
+  captured real frames whenever the timeout allowed a request to complete.
+  The same session reported `Desktop is rendering (frame N)` in both runs.
 
 ## When the desktop is black
 
@@ -281,7 +289,8 @@ Failure modes that have been seen on a device, and what they meant:
 Still not yet validated on a real device:
 
 * Frame latency, touch calibration, proot's syscall filtering, and the app-side
-  surface path (first-frame pacing, rotation).
+  surface path (first-frame pacing, rotation). The app-side status notice is
+  compile-verified only: it needs a device to see it drawn.
 * What the shell shows beyond the desktop surface: no app has been launched from
   the desktop and the greeter's user/AccountsService lookups fail in the guest
   (`Failed to get 'RealName' property`, `Cannot read property 'username' of
