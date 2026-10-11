@@ -273,8 +273,12 @@ in a container that has `/proc`, and it reports both halves:
 [smoke] note: the desktop application was accepted by the shell (window on the desktop)
 ```
 
-So with `APP_ID` set and `/proc` readable, the shell hosts the application as a
-window on the desktop. When it does not, the session log says so itself:
+So with `APP_ID` set and `/proc` readable the shell accepts the client and keeps it
+running (a refused client is dropped within a second - locally the app dies right
+after `ApplicationManager REJECTED connection ... unable to read the process
+command line`), which is what puts its toplevel into the shell's Stage. Whether the
+Stage then composites that window onto the captured frame is not measured
+separately. When the app does not survive, the session log says so itself:
 `WARNING: the desktop application (lomiri-terminal-app) exited; the desktop has no
 window`, followed by the app's own log.
 
@@ -372,9 +376,11 @@ Still not yet validated on a real device:
   services; `lomiri-app-launch` app launching additionally needs a systemd user
   session.
 * App hosting: verified by the provisioning smoke test (see "The shell has no
-  session"): with `/proc` readable and `APP_ID` set, the shell accepts the app as a
-  window. The local sandbox cannot reach that step, because its `/proc` denies
-  `cmdline` reads. Still unverified on a real device, where proot binds `/proc`.
+  session") as far as it can be - with `/proc` readable and `APP_ID` set the shell
+  accepts the client and keeps it running; a separate check of whether the Stage
+  composites that window into the captured frame is not implemented. The local
+  sandbox cannot reach the step at all, because its `/proc` denies `cmdline`
+  reads. Still unverified on a real device, where proot binds `/proc`.
 * App launching from the launcher: `lomiri-app-launch` resolves app ids and starts
   apps through systemd user units, which this guest does not run, so the launcher's
   app grid stays empty and the session starts its one application directly.
