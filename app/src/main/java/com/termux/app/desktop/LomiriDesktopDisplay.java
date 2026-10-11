@@ -7,10 +7,13 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
+import java.util.ArrayDeque;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.MappedByteBuffer;
@@ -43,7 +46,8 @@ import java.nio.channels.FileChannel;
  *   uint32 stride   bytes per row
  *   uint32 format   = 1 (ARGB_8888, Android Bitmap word order)
  *   uint32 seq      incremented by the guest on every completed frame
- *   uint32 flags    bit 0 = producer ready
+ *   uint32 flags    bit 0 = producer ready, bit 1 = producer stalled
+ *                   (compositor not answering capture requests), bit 2 = producer failed
  * </pre>
  * followed by {@code height * stride} pixel bytes.
  */
@@ -61,6 +65,16 @@ public final class LomiriDesktopDisplay {
     public static final int HEADER_SIZE = 32;
 
     public static final int FLAG_PRODUCER_READY = 0x1;
+    /** The producer is running but the compositor is not producing frames. */
+    public static final int FLAG_PRODUCER_STALLED = 0x2;
+    /** The producer gave up; {@link #getProducerReason()} says why. */
+    public static final int FLAG_PRODUCER_ERROR = 0x4;
+
+    /** Producer states, as reported through the shared header. */
+    public static final int STATE_STARTING = 0;
+    public static final int STATE_STREAMING = 1;
+    public static final int STATE_STALLED = 2;
+    public static final int STATE_ERROR = 3;
 
     // Input record layout (little-endian, 24 bytes). Mirrored in termdeb-mir-bridge.c.
     public static final int INPUT_TYPE_TOUCH = 1;
@@ -148,6 +162,60 @@ public final class LomiriDesktopDisplay {
     }
 
     /**
+     * What the guest producer is doing right now. A desktop that stays black is either
+     * still starting, stalled, or failed; the states are published in the header so the
+     * view can say which one it is instead of showing an unexplained black screen.
+     */
+    public synchronized int getProducerState() {
+        if (mHeader == null) return STATE_STARTING;
+        int flags = mHeader.getInt(28);
+        if ((flags & FLAG_PRODUCER_ERROR) != 0) return STATE_ERROR;
+        if (mLastSeq > 0) return STATE_STREAMING;
+        if ((flags & FLAG_PRODUCER_STALLED) != 0) return STATE_STALLED;
+        return STATE_STARTING;
+    }
+
+    /**
+     * Why the guest producer is not delivering frames: the most relevant lines of the
+     * producer's own log ({@code runtime/bridge.log}, written inside the guest), or
+     * {@code null} when there is nothing to report yet.
+     */
+    @Nullable
+    public String getProducerReason() {
+        File runtimeDir = new File(mFramebufferFile.getParentFile(), "runtime");
+        File log = new File(runtimeDir, "bridge.log");
+        try {
+            return tailOf(log, 3, 300);
+        } catch (IOException e) {
+            return null;
+        }
+    }
+
+    /** Last {@code lines} non-empty lines of a log file, at most {@code maxChars} long. */
+    @Nullable
+    private static String tailOf(File file, int lines, int maxChars) throws IOException {
+        if (!file.isFile()) return null;
+        ArrayDeque<String> tail = new ArrayDeque<>();
+        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                tail.addLast(line);
+                if (tail.size() > lines) tail.removeFirst();
+            }
+        }
+        if (tail.isEmpty()) return null;
+        StringBuilder out = new StringBuilder();
+        for (String line : tail) {
+            if (out.length() > 0) out.append('\n');
+            out.append(line);
+        }
+        String text = out.toString();
+        return text.length() > maxChars ? text.substring(text.length() - maxChars) : text;
+    }
+
+    /**
      * If the guest produced a new frame since the last call, copy it into a reused
      * {@link Bitmap} and return it, otherwise return {@code null}.
      */
@@ -163,9 +231,13 @@ public final class LomiriDesktopDisplay {
     public synchronized Bitmap pollFrame() {
         if (mMap == null) return null;
         if (mHeader.getInt(0) != MAGIC) return null;
+        if ((mHeader.getInt(28) & FLAG_PRODUCER_READY) == 0) return null;
 
         int seq = mHeader.getInt(24);
-        if (seq == mLastSeq) return null;
+        /* The producer publishes seq == 0 with an untouched (all zero) framebuffer.
+           Presenting that would paint a black desktop over the previous frame and
+           make a starting or broken guest look like a black screen. */
+        if (seq <= 0 || seq == mLastSeq) return null;
 
         int width = mHeader.getInt(8);
         int height = mHeader.getInt(12);

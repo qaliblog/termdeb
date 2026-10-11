@@ -575,7 +575,7 @@
       "binary": "termdeb-mir-bridge",
       "guest_path": "/usr/local/bin/termdeb-mir-bridge",
       "source": "termdeb-assets/prebuilt/mir-bridge/termdeb-mir-bridge.c",
-      "notes": "Compiled for ARM64 inside the Debian rootfs during provisioning (provision-desktop.sh) against wayland-client and xkbcommon. Converts Mir's screencopy frames (ARGB8888, y-inverted) into the Android bitmap layout."
+      "notes": "Compiled for ARM64 inside the Debian rootfs during provisioning (provision-desktop.sh) against wayland-client and xkbcommon. Converts Mir's screencopy frames (ARGB8888, y-inverted) into the Android bitmap layout. A capture request that the compositor does not answer within TERMDEB_DESKTOP_CAPTURE_TIMEOUT_MS (default 4000) is abandoned and re-issued on a fresh connection, so a compositor that never composed a frame cannot leave the app on a silent black screen; the shared header also carries producer state (ready / stalled / failed) that the app turns into an on-screen status."
     },
     "guest_libraries": {
       "input_termdeb_stub": "/usr/lib/aarch64-linux-gnu/mir/server-platform/input-termdeb-stub.so",

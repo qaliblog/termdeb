@@ -117,12 +117,24 @@ uint32 height
 uint32 stride  (bytes per row)
 uint32 format  = 1 (ARGB_8888, Android Bitmap word order)
 uint32 seq     (incremented by the producer on every completed frame)
-uint32 flags   (bit 0 = producer ready)
+uint32 flags   (bit 0 = producer ready, bit 1 = producer stalled, bit 2 = producer failed)
 ```
 
 The app preallocates the file and publishes the desktop geometry in the header;
 the guest bridge reads it, configures Mir's virtual output to match, and streams
 frames.
+
+`seq` and `flags` are what make a black screen readable rather than mysterious:
+
+* the producer writes `seq = 0` while the framebuffer is still untouched, and the
+  app ignores that (`seq <= 0`) so it never paints a zeroed buffer as a black
+  desktop over a good frame;
+* the producer publishes `seq` only after the pixels are in place (a release
+  barrier separates the two), so a new `seq` always means a complete frame;
+* `flags` bit 1 is set when the compositor has not answered several capture
+  requests in a row, bit 2 when the producer gave up. The view reads both and
+  replaces the black surface with the state and the producer's own last log
+  lines, so a failed desktop says why it failed.
 
 ### Input records
 
@@ -166,6 +178,7 @@ rm -f "$DEBIAN_TAR"; tar -czf "$DEBIAN_TAR" -C "$STAGE" .
 | `$PREFIX/bin/termdeb-desktop` | Host entry point; enters Debian and starts the session. |
 | guest `/usr/local/bin/termdeb-desktop-session` | Brings up Mir, Lomiri and the bridge. |
 | guest `/usr/local/bin/termdeb-mir-bridge` | Captures Mir frames and injects input. |
+| `files/termdeb-desktop/runtime/bridge.log` | Producer log: capture progress/errors, read by the app for its status notice. |
 | guest `.../mir/server-platform/input-termdeb-stub.so` | Mir input platform (`termdeb:input-stub`). |
 | guest `/usr/local/lib/termdeb-mir-eintr-shim.so` | EINTR shim preloaded into the Lomiri shell (nested-Wayland `poll()`). |
 | `files/termdeb-desktop/fb.buf` | Shared framebuffer (bind-mounted to `/run/termdeb`). |
@@ -223,18 +236,58 @@ guest session script end to end in a chroot on an aarch64 host:
 * `provision-desktop.sh` runs the *same* session script as its smoke test and
   fails the build unless non-black desktop pixels reach the shared framebuffer.
 
-Not yet validated:
+## When the desktop is black
 
-* **On a real device.** Frame latency, touch calibration, proot's syscall
-  filtering, and the app-side surface path (first-frame pacing, rotation) still
-  need a device run.
-* **What the shell shows.** Input injection reaches the outer seat and the nested
-  server (both Mir input drivers are selected), but no app has been launched from
-  the  desktop and the greeter's user/AccountsService lookups fail in the guest
+The desktop cannot be silently black any more; every layer reports what it is
+doing:
+
+* the session script logs `Waiting for the first frame in /run/termdeb/fb.buf...`
+  and then either `Desktop is rendering (frame N); the Android view is being fed.`
+  or, after 30 s without a frame, a `WARNING: no desktop frame reached ...` line
+  followed by the tail of `bridge.log`. That is the first thing to read, and the
+  app shows the same status on the surface (see below);
+* `bridge.log` records `frame N captured (WxH, 4096 sampled pixels, M non-black)`
+  every 150 frames, so a black *capture* (nothing composited yet) can be told
+  apart from a desktop that never captured at all, and any fatal condition
+  (`ERROR: ...`) names itself;
+* `mir.log` records Mir startup, the selected platform drivers, and whether the
+  virtual output was configured;
+* `lomiri.log` records whether the shell nested on the outer server
+  (`Selected display driver: mir:wayland`), whether it crashed (`SIGSEGV`/`Fatal
+  signal`) or whether the nested-Wayland event loop aborted (`Failed to wait for
+  event`);
+* the app side reads `flags`/`seq` from the shared header and, when no frame has
+  arrived, replaces the black surface with the producer state (starting / stalled
+  / failed) plus the producer's last log lines.
+
+Failure modes that have been seen on a device, and what they meant:
+
+* **`Desktop view is a blank screen` with everything "up" (Mir, Lomiri, bridge).**
+  The bridge had attached but the framebuffer stayed at `seq = 0`, i.e. no frame
+  was ever copied. Two known causes: the bridge never sent the screencopy `copy`
+  request (fixed: version-aware, after `buffer_done` on v3 and immediately after
+  `buffer` on v1/v2), or the compositor never answered a request. The latter is
+  now bounded: a capture request that is not answered within 4 s
+  (`TERMDEB_DESKTOP_CAPTURE_TIMEOUT_MS`) is abandoned, the connection is
+  re-established and the request is re-issued, and after three consecutive stalls
+  the header is marked stalled. A request Mir never answers - e.g. because it
+  never composed a frame - used to leave the bridge idle forever with the app on a
+  black screen.
+* **A black screen before the shell paints.** The frame is genuinely black until
+  Lomiri paints; with software rendering (llvmpipe) on a phone-sized geometry this
+  is tens of seconds. Logcat/`bridge.log` now shows those frames as
+  `0 non-black` sampled pixels.
+
+Still not yet validated on a real device:
+
+* Frame latency, touch calibration, proot's syscall filtering, and the app-side
+  surface path (first-frame pacing, rotation).
+* What the shell shows beyond the desktop surface: no app has been launched from
+  the desktop and the greeter's user/AccountsService lookups fail in the guest
   (`Failed to get 'RealName' property`, `Cannot read property 'username' of
   undefined`), so the session may stop at the greeter rather than a logged-in
   desktop.
-* **Applications.** Apps launched by the shell talk to the nested server through
+* The app launch path: apps launched by the shell talk to the nested server through
   `WAYLAND_DISPLAY`; the session publishes that variable, but the launch path
   (`lomiri-app-launch`, which in the guest has no systemd user session) has not
   been exercised.

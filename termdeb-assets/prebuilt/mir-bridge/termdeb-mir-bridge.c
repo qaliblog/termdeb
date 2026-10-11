@@ -57,7 +57,23 @@
 #define FB_VERSION 1u
 #define FB_FORMAT_ARGB8888 1u
 #define FB_HEADER_SIZE 32u
-#define FB_FLAG_READY 0x1u
+
+/* Header flags (offset 28). The Android side only presents a frame once the
+   producer is ready and has written at least one, so an untouched (all zero)
+   framebuffer is never mistaken for a rendered desktop. */
+#define FB_FLAG_READY 0x1u    /* producer mapped the framebuffer and is running */
+#define FB_FLAG_STALLED 0x2u  /* the compositor is not answering capture requests */
+#define FB_FLAG_ERROR 0x4u    /* the producer gave up; see its log for the reason */
+
+/* A screencopy request is only answered once the compositor has composed a
+   frame. A request that is never answered would leave the bridge idle forever
+   (and the app on a black screen), so the wait is bounded and the connection is
+   re-established when it expires. */
+#define CAPTURE_TIMEOUT_MS_DEFAULT 4000u
+/* Consecutive unanswered requests before the shared header is marked stalled. */
+#define CAPTURE_STALL_LIMIT 3u
+/* Frames between progress log lines (the log is a diagnostic aid, not a trace). */
+#define FRAME_LOG_INTERVAL 150u
 
 #define INPUT_RECORD_SIZE 24u
 #define INPUT_TYPE_TOUCH 1
@@ -103,6 +119,12 @@ struct bridge {
     bool capture_pending;
     bool frame_ready;
 
+    /* Watchdog state for unanswered capture requests. */
+    uint64_t capture_started_ms;
+    unsigned capture_timeout_ms;
+    unsigned stalls;
+    uint64_t frames_written;
+
     /* Current screencopy frame (an object per capture request). The manager is
        bound at version 3 when the compositor offers it, and then the copy
        request has to wait for the buffer_done event; on versions 1/2 it goes
@@ -147,6 +169,13 @@ static uint64_t now_ms(void);
 static void fb_write_u32(uint32_t off, uint32_t value) {
     /* Host is little-endian (ARM64); match the Android ByteOrder.LITTLE_ENDIAN reader. */
     if (g_fb) memcpy(g_fb + off, &value, sizeof(value));
+}
+
+static void fb_set_flag(uint32_t bit, bool on) {
+    uint32_t flags;
+    if (!g_fb) return;
+    memcpy(&flags, g_fb + 28, sizeof(flags));
+    fb_write_u32(28, on ? (flags | bit) : (flags & ~bit));
 }
 
 static int setup_framebuffer(struct bridge *b, const char *path, uint32_t width, uint32_t height) {
@@ -300,17 +329,35 @@ static void create_shm_buffer(struct bridge *b, uint32_t width, uint32_t height,
     size_t size = (size_t)stride * height;
     int fd = memfd_create("termdeb-bridge-shm", MFD_CLOEXEC);
     if (fd < 0) {
-        log_msg("memfd_create failed: %s", strerror(errno));
+        /* memfd_create is not universally available (some proot/seccomp
+           combinations refuse it). /dev/shm always is: the host script binds the
+           app's tmp/shm directory onto it. Without this fallback a refused
+           memfd turns into a silently black desktop: no buffer, no copy
+           request, and the app never sees a frame. */
+        char name[64];
+        snprintf(name, sizeof(name), "/termdeb-bridge-%d", (int)getpid());
+        fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            shm_unlink(name);
+            log_msg("memfd_create unavailable (%s); using /dev/shm instead", strerror(errno));
+        }
+    }
+    if (fd < 0) {
+        log_msg("ERROR: cannot create a shared memory buffer for the capture: %s",
+                strerror(errno));
+        fb_set_flag(FB_FLAG_ERROR, true);
         return;
     }
     if (ftruncate(fd, (off_t)size) != 0) {
-        log_msg("ftruncate shm failed: %s", strerror(errno));
+        log_msg("ERROR: cannot size the capture buffer (%zu bytes): %s", size, strerror(errno));
+        fb_set_flag(FB_FLAG_ERROR, true);
         close(fd);
         return;
     }
     void *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (data == MAP_FAILED) {
-        log_msg("mmap shm failed: %s", strerror(errno));
+        log_msg("ERROR: cannot map the capture buffer (%zu bytes): %s", size, strerror(errno));
+        fb_set_flag(FB_FLAG_ERROR, true);
         close(fd);
         return;
     }
@@ -366,7 +413,32 @@ static void copy_frame_to_fb(struct bridge *b) {
     }
 
     b->seq++;
+    /* Publish the pixels before the sequence number: the Android side treats a
+       changed seq as "the pixels are complete" and must never read a frame that
+       was only half written. */
+    __sync_synchronize();
     fb_write_u32(24, b->seq);
+    fb_set_flag(FB_FLAG_STALLED, false);
+    if (b->stalls) b->stalls = 0;
+}
+
+/* Sampled "is there anything on screen" check, used only for the progress log
+   lines so a black desktop can be told apart from a desktop that never
+   captured. */
+static uint32_t sampled_nonblack_pixels(struct bridge *b) {
+    const uint8_t *p;
+    size_t total, step, off;
+    uint32_t nonblack = 0;
+
+    if (!b->fb_map) return 0;
+    p = b->fb_map + FB_HEADER_SIZE;
+    total = (size_t)b->width * b->height * 4;
+    step = total / 4096;
+    if (step < 4) step = 4;
+    for (off = 0; off + 3 < total; off += step) {
+        if (p[off] || p[off + 1] || p[off + 2]) nonblack++;
+    }
+    return nonblack;
 }
 
 /* ------------------------------------------------------------------ screencopy */
@@ -422,6 +494,15 @@ static void sc_ready(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_
     struct bridge *b = data;
     copy_frame_to_fb(b);
     b->frame_ready = true;
+    b->frames_written++;
+    if (b->frames_written == 1 || (b->frames_written % FRAME_LOG_INTERVAL) == 0) {
+        uint32_t nonblack = sampled_nonblack_pixels(b);
+        log_msg("frame %u captured (%ux%u, %u sampled pixels, %u non-black)",
+                (unsigned)b->frames_written, b->buf_width, b->buf_height, 4096u, nonblack);
+        if (nonblack == 0)
+            log_msg("WARNING: the captured frame is entirely black; the compositor "
+                    "has no desktop content to show yet");
+    }
     sc_finish(b);
 }
 
@@ -470,6 +551,7 @@ static void request_capture(struct bridge *b) {
     if (!frame) return;
     zwlr_screencopy_frame_v1_add_listener(frame, &sc_frame_listener, b);
     b->capture_pending = true;
+    b->capture_started_ms = now_ms();
 }
 
 /* ------------------------------------------------------------------ registry */
@@ -554,6 +636,65 @@ static void usage(const char *argv0) {
         "Usage: %s --fb <path> [--input-socket <name>] [--width N] [--height N]\n", argv0);
 }
 
+/* Attach to the compositor named by WAYLAND_DISPLAY and bind everything the
+   bridge needs from it. Called once at startup and again by the watchdog below
+   when a capture request is never answered. */
+static int connect_display(struct bridge *b) {
+    b->display = wl_display_connect(NULL);
+    if (!b->display) {
+        log_msg("cannot connect to the compositor (is WAYLAND_DISPLAY set?)");
+        return -1;
+    }
+
+    b->registry = wl_display_get_registry(b->display);
+    wl_registry_add_listener(b->registry, &registry_listener, b);
+    wl_display_roundtrip(b->display);
+    wl_display_roundtrip(b->display);
+
+    if (!b->screencopy) {
+        log_msg("ERROR: compositor does not expose wlr-screencopy; cannot capture the desktop");
+        return -1;
+    }
+    if (!b->output) {
+        log_msg("ERROR: no wl_output found");
+        return -1;
+    }
+
+    install_keymap(b);
+    if (b->vp_manager && b->seat) {
+        b->pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(b->vp_manager, b->seat);
+    }
+    return 0;
+}
+
+/* Drop every proxy that belonged to the connection that was just disconnected. */
+static void forget_display(struct bridge *b) {
+    /* The capture mapping belonged to the old connection's buffers: release it so
+       repeated reconnects cannot leak a full frame each. */
+    if (b->shm_data) {
+        munmap(b->shm_data, b->shm_size);
+        b->shm_data = NULL;
+        b->shm_size = 0;
+    }
+
+    b->display = NULL;
+    b->registry = NULL;
+    b->shm = NULL;
+    b->output = NULL;
+    b->seat = NULL;
+    b->screencopy = NULL;
+    b->vk_manager = NULL;
+    b->vp_manager = NULL;
+    b->keyboard = NULL;
+    b->pointer = NULL;
+    b->frame = NULL;
+    b->buffer = NULL;
+    b->have_buffer = false;
+    b->copy_sent = false;
+    b->capture_pending = false;
+    b->capture_started_ms = 0;
+}
+
 int main(int argc, char **argv) {
     struct bridge b;
     memset(&b, 0, sizeof(b));
@@ -576,29 +717,17 @@ int main(int argc, char **argv) {
 
     if (setup_framebuffer(&b, fb_path, width, height) != 0) return 1;
 
-    b.display = wl_display_connect(NULL);
-    if (!b.display) {
-        log_msg("cannot connect to the compositor (is WAYLAND_DISPLAY set?)");
-        return 1;
+    /* The wait for an answered capture request is bounded; see CAPTURE_TIMEOUT_MS_DEFAULT. */
+    b.capture_timeout_ms = CAPTURE_TIMEOUT_MS_DEFAULT;
+    const char *timeout_env = getenv("TERMDEB_DESKTOP_CAPTURE_TIMEOUT_MS");
+    if (timeout_env && *timeout_env) {
+        long value = strtol(timeout_env, NULL, 10);
+        if (value > 0 && value < 3600000) b.capture_timeout_ms = (unsigned)value;
     }
 
-    b.registry = wl_display_get_registry(b.display);
-    wl_registry_add_listener(b.registry, &registry_listener, &b);
-    wl_display_roundtrip(b.display);
-    wl_display_roundtrip(b.display);
-
-    if (!b.screencopy) {
-        log_msg("ERROR: compositor does not expose wlr-screencopy; cannot capture the desktop");
+    if (connect_display(&b) != 0) {
+        fb_set_flag(FB_FLAG_ERROR, true);
         return 1;
-    }
-    if (!b.output) {
-        log_msg("ERROR: no wl_output found");
-        return 1;
-    }
-
-    install_keymap(&b);
-    if (b.vp_manager && b.seat) {
-        b.pointer = zwlr_virtual_pointer_manager_v1_create_virtual_pointer(b.vp_manager, b.seat);
     }
 
     if (connect_input_socket(&b, input_socket) != 0) {
@@ -613,6 +742,36 @@ int main(int argc, char **argv) {
     uint64_t last_capture = 0;
 
     while (true) {
+        uint64_t now = now_ms();
+
+        /* Watchdog: the compositor only answers a capture request once it has
+           composed a frame. A request that is never answered leaves this loop
+           idle forever, which the app cannot tell apart from a crashed desktop:
+           it just stays black. Abandon the connection and start over instead. */
+        if (b.capture_pending && b.capture_started_ms &&
+            now - b.capture_started_ms > b.capture_timeout_ms) {
+            b.stalls++;
+            if (b.stalls == 1 || (b.stalls % 10) == 0)
+                log_msg("WARNING: the compositor did not answer a capture request within %u ms "
+                        "(%u in a row); re-establishing the connection",
+                        b.capture_timeout_ms, b.stalls);
+            if (b.stalls == CAPTURE_STALL_LIMIT) {
+                fb_set_flag(FB_FLAG_STALLED, true);
+                log_msg("WARNING: still no frame after %u unanswered capture requests; the "
+                        "compositor is not producing one", b.stalls);
+            }
+            wl_display_disconnect(b.display);
+            forget_display(&b);
+            if (connect_display(&b) != 0) {
+                log_msg("ERROR: could not re-attach to the compositor");
+                fb_set_flag(FB_FLAG_ERROR, true);
+                break;
+            }
+            log_msg("re-attached to the compositor");
+            last_capture = 0;
+            continue;
+        }
+
         while (wl_display_prepare_read(b.display) != 0) {
             wl_display_dispatch_pending(b.display);
         }
@@ -628,7 +787,8 @@ int main(int argc, char **argv) {
         }
 
         if (wl_display_flush(b.display) < 0 && errno != EAGAIN) {
-            log_msg("display connection lost");
+            log_msg("ERROR: display connection lost");
+            fb_set_flag(FB_FLAG_ERROR, true);
             break;
         }
 
@@ -663,7 +823,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        uint64_t now = now_ms();
         if (!b.capture_pending && now - last_capture >= frame_interval_ms) {
             if (b.serial < UINT32_MAX) b.serial++;
             request_capture(&b);

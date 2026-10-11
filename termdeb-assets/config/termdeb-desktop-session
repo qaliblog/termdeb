@@ -257,7 +257,15 @@ WAYLAND_DISPLAY="${OUTER_DISPLAY}" "${BRIDGE_BIN}" \
   >>"${XDG_RUNTIME_DIR}/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
-# Keep the session alive until the compositor/bridge exits.
+# ---- 4. Keep the session alive and report capture progress -------------------
+#
+# The Android view only has something to show once frames reach the shared
+# framebuffer; until then it is simply black, which is indistinguishable from a
+# desktop that failed to start. So watch the framebuffer the bridge writes and
+# say so in the session log, with the bridge's own log when nothing arrives.
+log "Waiting for the first frame in ${FB_PATH}..."
+FRAME_WAIT=0
+FRAME_REPORTED=0
 while true; do
   if ! kill -0 "${BRIDGE_PID}" 2>/dev/null; then
     log "Display bridge exited."
@@ -272,6 +280,25 @@ while true; do
     break
   fi
   sleep 2
+  FRAME_WAIT=$((FRAME_WAIT + 2))
+
+  _seq=$(read_u32 24 "${FB_PATH}")
+  case "${_seq:-x}" in ''|*[!0-9]*) _seq=0 ;; esac
+  if [ "${_seq}" -gt 0 ] && [ "${FRAME_REPORTED}" = "0" ]; then
+    FRAME_REPORTED=1
+    log "Desktop is rendering (frame ${_seq}); the Android view is being fed."
+  fi
+
+  if [ "${FRAME_REPORTED}" = "0" ] && [ "${FRAME_WAIT}" = "30" ]; then
+    log "WARNING: no desktop frame reached ${FB_PATH} after ${FRAME_WAIT}s; the Android view stays black."
+    log "--- ${XDG_RUNTIME_DIR}/bridge.log ---"
+    tail -n 20 "${XDG_RUNTIME_DIR}/bridge.log" 2>/dev/null || true
+  fi
+
+  # Keep reporting until content appears, then stop spamming the log.
+  if [ "${FRAME_REPORTED}" = "1" ] && [ "${FRAME_WAIT}" = "32" ]; then
+    log "Desktop frames are flowing; monitoring the session."
+  fi
 done
 
 exit 0
