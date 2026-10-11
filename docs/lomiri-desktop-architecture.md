@@ -275,7 +275,7 @@ Failure modes that have been seen on a device, and what they meant:
   was ever copied. Two known causes: the bridge never sent the screencopy `copy`
   request (fixed: version-aware, after `buffer_done` on v3 and immediately after
   `buffer` on v1/v2), or the compositor never answered a request. The latter is
-  now bounded: a capture request that is not answered within 4 s
+  now bounded: a capture request that is not answered within 10 s
   (`TERMDEB_DESKTOP_CAPTURE_TIMEOUT_MS`) is abandoned, the connection is
   re-established and the request is re-issued, and after three consecutive stalls
   the header is marked stalled. A request Mir never answers - e.g. because it

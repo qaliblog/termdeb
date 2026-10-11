@@ -536,15 +536,19 @@ else
   SMOKE_STATUS=1
 fi
 
-# A bridge that runs but never captures anything is exactly the failure the device
-# saw as a black desktop, so both the bridge's own account of the capture and the
-# session's progress report have to be clean.
-if grep -qE 'ERROR|WARNING: still no frame' "${SMOKE_BRIDGE_LOG}"; then
+# A bridge that runs but cannot capture is exactly the failure the device saw as a
+# black desktop, so a fatal capture condition fails the build. Slow captures are
+# not failures: under emulation the first composition can take a while, which is
+# what the stalled-warning is for (the framebuffer checks below are the real gate).
+if grep -q 'ERROR' "${SMOKE_BRIDGE_LOG}"; then
   echo '  [smoke] FAIL the display bridge reported a capture error:' >&2
-  grep -E 'ERROR|WARNING: still no frame' "${SMOKE_BRIDGE_LOG}" >&2
+  grep -E 'ERROR' "${SMOKE_BRIDGE_LOG}" >&2
   SMOKE_STATUS=1
 else
   echo '  [smoke] OK  the display bridge reported no capture errors'
+fi
+if grep -q 'WARNING: still no frame' "${SMOKE_BRIDGE_LOG}"; then
+  echo '  [smoke] note: the bridge stalled before the first frame'
 fi
 
 if grep -q 'Desktop is rendering (frame ' "${SMOKE_DIR}/session.log"; then

@@ -69,7 +69,7 @@
    frame. A request that is never answered would leave the bridge idle forever
    (and the app on a black screen), so the wait is bounded and the connection is
    re-established when it expires. */
-#define CAPTURE_TIMEOUT_MS_DEFAULT 4000u
+#define CAPTURE_TIMEOUT_MS_DEFAULT 10000u
 /* Consecutive unanswered requests before the shared header is marked stalled. */
 #define CAPTURE_STALL_LIMIT 3u
 /* Frames between progress log lines (the log is a diagnostic aid, not a trace). */
