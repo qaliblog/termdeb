@@ -240,18 +240,37 @@ Failed to connect to logind's session Lock/Unlock signals
 Unable to list SystemD units: ... Process org.freedesktop.systemd1 exited with status 1
 ```
 
-A usable Lomiri desktop needs session services that a proot guest does not have,
-all of them on the **system** bus: logind (session state), AccountsService (the
-users the greeter lists), LightDM/PAM (the login itself), and
-`lomiri-app-launch` plus a systemd user session (starting apps). Without them the
-shell renders its wallpaper, an empty panel and an empty launcher, and neither the
-greeter's login UI nor any application window can appear.
+A usable Lomiri desktop needs session services that a proot guest does not have:
+logind (session state), AccountsService (the users the greeter lists), LightDM/PAM
+(the login itself), and `lomiri-app-launch` plus a systemd user session (starting
+apps) - all of them on the **system** bus, and the shell's indicators and app units
+are systemd *user* units. Without them the shell renders its wallpaper, an empty
+panel and an empty launcher, and neither the greeter's login UI nor any application
+window can appear.
+
+What the session script does about it (all best-effort, time-boxed, never fatal):
+
+| Step | Effect |
+| --- | --- |
+| starts a **system D-Bus** at `/run/dbus/system_bus_socket` | AccountsService and the other system services become reachable again |
+| starts the **clock indicator** (`/usr/libexec/lomiri-indicator-datetime/...`, a systemd user unit that never starts here) | the panel stops being an empty dark strip: measured 50 -> 138 white pixels in the top 24 px band |
+| starts **`lomiri-terminal-app`** on the shell's own socket with `APP_ID`/`QT_QPA_PLATFORM=wayland` | the desktop gets a window instead of only a wallpaper, and its death is reported with its own log tail |
+
+The remaining gap is the *session* itself: no logind, so no login and no session
+list (the shell logs `Invalid session path`), and no systemd user session, so the
+indicators and apps have to be started by hand. The shell only accepts a client it
+can identify, which it does by reading the client's `/proc/<pid>/cmdline` and its
+environment for `APP_ID` - the guest has `/proc` bind-mounted by `termdeb-desktop`
+for exactly that reason. That authorisation step could not be exercised in the
+verification sandbox (its `/proc` denies `cmdline` reads, so the shell rejects the
+app with `unable to read the process command line`), so whether the app window
+appears is a **device** check: the session log says
+`WARNING: the desktop application (lomiri-terminal-app) exited; the desktop has no
+window` with the app's log when it does not.
 
 Practical consequence: **"frames are flowing but the Android screen looks blank"
-is this state, not a bridge or app fault.** The guest session script therefore logs
-a `WARNING: the guest has no system D-Bus, so Lomiri has no session services`
-block when `/run/dbus/system_bus_socket` is missing, so the session output does not
-claim a working desktop.
+is this state, not a bridge or app fault.** The session script says so in its own
+output (`Note: no logind/LightDM user session ... the shell runs session-less`).
 
 ## Known limitations / validation status
 
@@ -337,12 +356,15 @@ Still not yet validated on a real device:
 * Frame latency, touch calibration, proot's syscall filtering, and the app-side
   surface path (first-frame pacing, rotation). The app-side status notice is
   compile-verified only: it needs a device to see it drawn.
-* What the shell shows beyond the desktop surface: the shell's session services
-  are missing in the guest, so the desktop is the wallpaper-only shell described
-  under "The shell has no session". Providing them (system bus + logind +
-  AccountsService + LightDM/PAM, and a systemd user session for
-  `lomiri-app-launch`) is the open work item behind a desktop that can actually
-  be used.
+* The session itself: the desktop now has a system bus, a panel clock and one
+  application, but no logind/LightDM login and no systemd user session, so it is a
+  session-less shell (see "The shell has no session"). A real login needs those
+  services; `lomiri-app-launch` app launching additionally needs a systemd user
+  session.
+* App hosting: the shell's `SessionAuthorizer` reads `/proc/<pid>/cmdline` and the
+  client's `APP_ID` before accepting a window. That could not be exercised here
+  (the sandbox denies `/proc` cmdline reads), so the app window path is
+  device-verified only by the session script's own report.
 * The app launch path: apps launched by the shell talk to the nested server through
   `WAYLAND_DISPLAY`; the session publishes that variable, but the launch path
   (`lomiri-app-launch`, which in the guest has no systemd user session) has not

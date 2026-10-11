@@ -147,6 +147,20 @@ if ! apt-get install -y --no-install-recommends lomiri lomiri-desktop-session; t
   echo '  [apt] WARNING: the Lomiri shell package set could not be installed.'
 fi
 
+# The shell's panel has no built-in content: the clock and every other panel entry
+# is an indicator *service* it loads over D-Bus. Debian ships the panel clock
+# indicator as a systemd user unit, which never starts in this guest (no systemd
+# user session), so the shipped session script starts it directly - installing it
+# is what makes the panel non-empty. The terminal app is small (deps are already
+# pulled in by lomiri) and is the one application the session script launches onto
+# the desktop so it is not a wallpaper. Both are best-effort: a desktop without
+# them still renders, and the session script reports their absence.
+for app_pkg in lomiri-indicator-datetime lomiri-terminal-app; do
+  if ! apt-get install -y --no-install-recommends "${app_pkg}"; then
+    echo "  [apt] note: desktop package '${app_pkg}' unavailable; the desktop loses its panel clock or its application"
+  fi
+done
+
 # Required: the Mir platform modules. Debian trixie ships each Mir platform in its
 # own versioned package (mir-platform-*23) behind a metapackage, and neither
 # lomiri nor mir-demos/mir_demo_server depends on any of them. Without them Mir

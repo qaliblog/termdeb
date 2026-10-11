@@ -63,6 +63,24 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-daemon >/dev/null 2
   fi
 fi
 
+# ---- System D-Bus -----------------------------------------------------------
+# The session bus is not enough: logind, AccountsService, polkit and the
+# app-launch machinery live on the *system* bus, and the shell asks for them. With
+# no system bus its lookups fail and the desktop stays inert - the shell logs
+# "Not connected to D-Bus server" for AccountsService and "Invalid session path"
+# for logind, cannot resolve the app ids the launcher asks about, and never gets a
+# user session. A guest has no bus running, so start one (time-boxed: a broken or
+# slow bus must not hold up the desktop).
+if [ ! -S /run/dbus/system_bus_socket ] && command -v dbus-daemon >/dev/null 2>&1; then
+  mkdir -p /run/dbus 2>/dev/null || true
+  if timeout 15 dbus-daemon --system --fork --nopidfile >/dev/null 2>&1 &&
+     [ -S /run/dbus/system_bus_socket ]; then
+    log "System bus started at /run/dbus/system_bus_socket"
+  else
+    log "WARNING: could not start a system D-Bus; logind/AccountsService stay unreachable"
+  fi
+fi
+
 # ---- Desktop geometry -------------------------------------------------------
 # The Android app preallocates the shared framebuffer and publishes the desktop
 # size in its header (width at byte 8, height at byte 12, little-endian).
@@ -88,6 +106,8 @@ sleep 1
 
 cleanup() {
   log "Shutting down desktop..."
+  [ -n "${APP_PID:-}" ] && kill "${APP_PID}" 2>/dev/null || true
+  for _pid in ${INDICATOR_PIDS:-}; do kill "${_pid}" 2>/dev/null || true; done
   [ -n "${BRIDGE_PID:-}" ] && kill "${BRIDGE_PID}" 2>/dev/null || true
   [ -n "${LOMIRI_PID:-}" ] && kill "${LOMIRI_PID}" 2>/dev/null || true
   [ -n "${MIR_PID:-}" ] && kill "${MIR_PID}" 2>/dev/null || true
@@ -234,23 +254,72 @@ else
   log "WARNING: no Lomiri shell binary found; Mir is running but no desktop shell is attached."
 fi
 
-# ---- 2b. Shell session check ------------------------------------------------
+# ---- 2b. Session state ------------------------------------------------------
 #
-# Lomiri draws its own shell (wallpaper, panel, launcher) with no session at all,
-# but a *usable* desktop needs session services that a proot guest does not have:
-#   logind             - session state (Lock/Unlock signals, session list)
-#   AccountsService    - the users the greeter lists
-#   LightDM / PAM      - the actual login
-#   lomiri-app-launch  - starting apps; needs a systemd user session
-# and they all live on the *system* bus. Without it the shell comes up empty: the
-# frame counter keeps climbing on the Android side (the compositor is answering
-# captures) while the screen shows only a wallpaper with an empty panel and
-# launcher. That looks exactly like a rendering failure, so say what it is.
+# The shell draws its own desktop (wallpaper, panel, launcher) with no session at
+# all, but a *usable* Lomiri session also needs services this guest only partly
+# has. The session/system buses started above let AccountsService and friends be
+# activated; what is still missing is the session itself:
+#   logind            - no session, so no login, no session list, no Lock/Unlock
+#                       signals (the shell logs "Invalid session path");
+#   LightDM / PAM     - no way to log a user in;
+#   systemd --user    - Debian ships the shell's indicators and app units as
+#                       systemd *user* units, which never start without it.
+# So the desktop is session-less: this script starts the panel's clock indicator
+# and one application by hand (below). Say so, so a wallpaper-only screen is not
+# read as a rendering failure.
 if [ ! -S /run/dbus/system_bus_socket ]; then
-  log "WARNING: the guest has no system D-Bus, so Lomiri has no session services:"
-  log "WARNING:   logind/AccountsService/LightDM are unreachable and lomiri-app-launch"
-  log "WARNING:   cannot start apps. Expect the shell wallpaper with an empty panel and"
-  log "WARNING:   launcher (no clock, no apps) even though frames reach the Android view."
+  log "WARNING: no system D-Bus: Lomiri cannot reach AccountsService/logind at all"
+fi
+log "Note: no logind/LightDM user session and no systemd user session in this guest;"
+log "Note: the shell runs session-less, with the clock indicator and one application"
+log "Note: started by this script. A wallpaper-only screen is this state."
+
+# ---- 2c. Panel indicators ---------------------------------------------------
+#
+# Lomiri's panel has no built-in content: every entry (starting with the clock) is
+# an indicator *service* that the shell loads over D-Bus. Debian ships them as
+# systemd *user* units, and this guest has no user session, so they would never
+# start on their own and the panel stays an empty dark strip. Start the clock
+# indicator by hand; it owns its bus name and the shell picks it up. Failures are
+# not fatal (the desktop still works without a clock).
+INDICATOR_PIDS=""
+start_indicator() {
+  local bin="$1" name="$2"
+  [ -x "${bin}" ] || return 0
+  "${bin}" >>"${XDG_RUNTIME_DIR}/indicators.log" 2>&1 &
+  INDICATOR_PIDS="${INDICATOR_PIDS} $!"
+  log "Started the ${name} indicator for the panel"
+}
+
+for _indicator in \
+  "/usr/libexec/lomiri-indicator-datetime/lomiri-indicator-datetime-service:date/time"; do
+  start_indicator "${_indicator%%:*}" "${_indicator##*:}"
+  break
+done
+
+# ---- 2d. Desktop application -------------------------------------------------
+#
+# A shell with no windows is still a blank screen. Launch one application on the
+# shell's own socket so there is something usable on the desktop, and report it.
+# The shell only accepts a client it can identify, which it does by reading the
+# client's /proc/<pid>/cmdline (and its environment for APP_ID); under proot the
+# guest has /proc bind-mounted for exactly that reason. Set
+# TERMDEB_DESKTOP_APP=none to keep the desktop empty.
+DESKTOP_APP="${TERMDEB_DESKTOP_APP:-lomiri-terminal-app}"
+APP_PID=""
+if [ "${DESKTOP_APP}" != "none" ] && [ -n "${WAYLAND_DISPLAY:-}" ] &&
+   command -v "${DESKTOP_APP}" >/dev/null 2>&1; then
+  log "Starting the desktop application: ${DESKTOP_APP}"
+  APP_ID="${DESKTOP_APP}" QT_QPA_PLATFORM="wayland" WAYLAND_DISPLAY="${WAYLAND_DISPLAY}" \
+    "${DESKTOP_APP}" >"${XDG_RUNTIME_DIR}/desktop-app.log" 2>&1 &
+  APP_PID=$!
+else
+  if [ "${DESKTOP_APP}" = "none" ]; then
+    log "Desktop application disabled (TERMDEB_DESKTOP_APP=none)"
+  else
+    log "No desktop application available (${DESKTOP_APP} is not installed)"
+  fi
 fi
 
 # ---- 3. Display/input bridge ------------------------------------------------
@@ -306,6 +375,16 @@ while true; do
   if [ "${_seq}" -gt 0 ] && [ "${FRAME_REPORTED}" = "0" ]; then
     FRAME_REPORTED=1
     log "Desktop frames are flowing (frame ${_seq}); the Android view is receiving them."
+  fi
+
+  # An application the shell refused (or that died) leaves the desktop blank; say
+  # so once, with the app's own last lines, instead of leaving it unexplained.
+  if [ -n "${APP_PID:-}" ] && [ "${APP_REPORTED:-0}" = "0" ] &&
+     ! kill -0 "${APP_PID}" 2>/dev/null; then
+    APP_REPORTED=1
+    log "WARNING: the desktop application (${DESKTOP_APP}) exited; the desktop has no window."
+    log "--- ${XDG_RUNTIME_DIR}/desktop-app.log (tail) ---"
+    tail -n 6 "${XDG_RUNTIME_DIR}/desktop-app.log" 2>/dev/null || true
   fi
 
   # A shell that hit a fatal error can hang instead of exiting, which would leave
