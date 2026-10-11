@@ -592,6 +592,25 @@ else
   SMOKE_STATUS=1
 fi
 
+# Informational: a frame is not the same as a desktop with visible content. The
+# panel clock comes from an indicator service the session starts by hand, and the
+# window comes from the one app it starts - the shell only accepts a client whose
+# /proc/<pid>/cmdline it can read, so whether the app appears is worth knowing here.
+if grep -q 'Started the .* indicator for the panel' "${SMOKE_DIR}/session.log"; then
+  echo '  [smoke] note: the session started the panel indicator (clock)'
+else
+  echo '  [smoke] note: the panel indicator did not start here'
+fi
+if grep -q 'Starting the desktop application' "${SMOKE_DIR}/session.log"; then
+  if grep -q 'WARNING: the desktop application .* exited' "${SMOKE_DIR}/session.log"; then
+    echo '  [smoke] note: the desktop application started but the shell refused/dropped it (no window)'
+  else
+    echo '  [smoke] note: the desktop application was accepted by the shell (window on the desktop)'
+  fi
+else
+  echo '  [smoke] note: no desktop application was started'
+fi
+
 if [ "${SMOKE_SEQ}" -gt 0 ] && [ "${SMOKE_NONBLACK}" -gt 0 ]; then
   echo "  [smoke] OK  the compositor rendered into the shared framebuffer (${SMOKE_NONBLACK} of 15000 sampled pixels non-black)"
 else
