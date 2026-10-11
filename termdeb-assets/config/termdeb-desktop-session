@@ -234,6 +234,25 @@ else
   log "WARNING: no Lomiri shell binary found; Mir is running but no desktop shell is attached."
 fi
 
+# ---- 2b. Shell session check ------------------------------------------------
+#
+# Lomiri draws its own shell (wallpaper, panel, launcher) with no session at all,
+# but a *usable* desktop needs session services that a proot guest does not have:
+#   logind             - session state (Lock/Unlock signals, session list)
+#   AccountsService    - the users the greeter lists
+#   LightDM / PAM      - the actual login
+#   lomiri-app-launch  - starting apps; needs a systemd user session
+# and they all live on the *system* bus. Without it the shell comes up empty: the
+# frame counter keeps climbing on the Android side (the compositor is answering
+# captures) while the screen shows only a wallpaper with an empty panel and
+# launcher. That looks exactly like a rendering failure, so say what it is.
+if [ ! -S /run/dbus/system_bus_socket ]; then
+  log "WARNING: the guest has no system D-Bus, so Lomiri has no session services:"
+  log "WARNING:   logind/AccountsService/LightDM are unreachable and lomiri-app-launch"
+  log "WARNING:   cannot start apps. Expect the shell wallpaper with an empty panel and"
+  log "WARNING:   launcher (no clock, no apps) even though frames reach the Android view."
+fi
+
 # ---- 3. Display/input bridge ------------------------------------------------
 BRIDGE_BIN=""
 for candidate in termdeb-mir-bridge /usr/local/bin/termdeb-mir-bridge; do
@@ -286,7 +305,17 @@ while true; do
   case "${_seq:-x}" in ''|*[!0-9]*) _seq=0 ;; esac
   if [ "${_seq}" -gt 0 ] && [ "${FRAME_REPORTED}" = "0" ]; then
     FRAME_REPORTED=1
-    log "Desktop is rendering (frame ${_seq}); the Android view is being fed."
+    log "Desktop frames are flowing (frame ${_seq}); the Android view is receiving them."
+  fi
+
+  # A shell that hit a fatal error can hang instead of exiting, which would leave
+  # this loop reporting healthy frames from a frozen compositor.
+  if [ "${LOMIRI_FATAL_REPORTED:-0}" = "0" ] && [ -f "${XDG_RUNTIME_DIR}/lomiri.log" ] &&
+     grep -qa "Mir fatal error" "${XDG_RUNTIME_DIR}/lomiri.log"; then
+    LOMIRI_FATAL_REPORTED=1
+    log "WARNING: the Lomiri shell reported a fatal error; the desktop is frozen."
+    log "--- ${XDG_RUNTIME_DIR}/lomiri.log (tail) ---"
+    tail -n 8 "${XDG_RUNTIME_DIR}/lomiri.log" 2>/dev/null || true
   fi
 
   if [ "${FRAME_REPORTED}" = "0" ] && [ "${FRAME_WAIT}" = "30" ]; then

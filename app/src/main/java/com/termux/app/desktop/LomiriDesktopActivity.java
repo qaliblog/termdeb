@@ -252,6 +252,10 @@ public final class LomiriDesktopActivity extends AppCompatActivity implements Se
         }
 
         Log.i(LOG_TAG, "Starting desktop session: " + executable);
+        // A new guest session re-publishes its geometry and flags from scratch, so the
+        // shared framebuffer starts clean. (open() deliberately keeps a producer header
+        // that is still live, so an Activity re-creation does not black out the screen.)
+        if (mDisplay != null) mDisplay.resetProducer();
         mTermuxService.createTermuxSession(executable, new String[0], null,
             TermuxConstants.TERMUX_HOME_DIR_PATH, false, DESKTOP_SESSION_NAME);
     }

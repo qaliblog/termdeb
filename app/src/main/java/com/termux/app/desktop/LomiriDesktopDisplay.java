@@ -144,7 +144,27 @@ public final class LomiriDesktopDisplay {
         mPixels = mMap.duplicate();
         mPixels.order(ByteOrder.nativeOrder());
 
-        // Publish the initial geometry so the guest bridge can pick a matching size.
+        // A guest session may already be running (this Activity can be recreated at
+        // any time: a configuration change, or the user coming back from the
+        // terminal). Its header is live state - the geometry it started with, the
+        // frame counter and the producer flags - so it is left untouched. Zeroing it
+        // here would drop the producer's "ready" flag and the view would never present
+        // another frame. The header is (re)initialised by resetProducer() when a new
+        // guest session is actually being started.
+        boolean producerHeader = mHeader.getInt(0) == MAGIC && mHeader.getInt(4) == VERSION;
+        if (!producerHeader) publishHeader();
+
+        Log.i(LOG_TAG, "Framebuffer mapped: " + mFramebufferFile + " (" + length + " bytes)"
+            + (producerHeader ? ", keeping the running producer's header" : ""));
+    }
+
+    /**
+     * Publish the initial header (geometry, zero frame counter, no flags) so the guest
+     * bridge can pick a matching output size. Called for a brand new framebuffer and by
+     * {@link #resetProducer()} right before a new guest session is started.
+     */
+    private void publishHeader() {
+        if (mHeader == null) return;
         mHeader.putInt(0, MAGIC);
         mHeader.putInt(4, VERSION);
         mHeader.putInt(8, mMaxWidth);
@@ -153,8 +173,18 @@ public final class LomiriDesktopDisplay {
         mHeader.putInt(20, FORMAT_ARGB_8888);
         mHeader.putInt(24, 0);
         mHeader.putInt(28, 0);
+    }
 
-        Log.i(LOG_TAG, "Framebuffer mapped: " + mFramebufferFile + " (" + length + " bytes)");
+    /**
+     * Start from a clean header. Only for the moment a new guest session is launched:
+     * the producer then re-publishes its own geometry and flags as it starts.
+     */
+    public synchronized void resetProducer() {
+        if (mMap == null) return;
+        mLastSeq = -1;
+        publishHeader();
+        Log.i(LOG_TAG, "Framebuffer reset for a new guest session: "
+            + mMaxWidth + "x" + mMaxHeight);
     }
 
     public synchronized boolean isProducerReady() {

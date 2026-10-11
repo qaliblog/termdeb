@@ -219,6 +219,40 @@ already contains everything the session needs (`xdg_wm_base`, `wl_shell`,
 `zwlr_screencopy_manager_v1`, `zwlr_virtual_pointer_manager_v1`,
 `zwp_virtual_keyboard_manager_v1`, `zxdg_output_manager_v1`, ...).
 
+## The shell has no session
+
+Measured on the shipped binaries at 2480x1232 and 800x600, the frames the bridge
+captures from Lomiri contain only the shell's own furniture:
+
+| Band | Content |
+| --- | --- |
+| top 3gu (24 px at 800x600) | the panel, drawn dark and **empty** - no clock, no indicators |
+| left ~3gu | the launcher, drawn faintly and **empty** - no apps |
+| the rest | the Lomiri wallpaper gradient, nothing else |
+
+There is no text anywhere in the frame (a full-frame scan finds no bright
+pixels beyond the 24 px mouse cursor at 0,0), and Lomiri's own log says why:
+
+```
+Failed to get user property "MmsEnabled" from AccountsService: "Not connected to D-Bus server"
+Invalid session path
+Failed to connect to logind's session Lock/Unlock signals
+Unable to list SystemD units: ... Process org.freedesktop.systemd1 exited with status 1
+```
+
+A usable Lomiri desktop needs session services that a proot guest does not have,
+all of them on the **system** bus: logind (session state), AccountsService (the
+users the greeter lists), LightDM/PAM (the login itself), and
+`lomiri-app-launch` plus a systemd user session (starting apps). Without them the
+shell renders its wallpaper, an empty panel and an empty launcher, and neither the
+greeter's login UI nor any application window can appear.
+
+Practical consequence: **"frames are flowing but the Android screen looks blank"
+is this state, not a bridge or app fault.** The guest session script therefore logs
+a `WARNING: the guest has no system D-Bus, so Lomiri has no session services`
+block when `/run/dbus/system_bus_socket` is missing, so the session output does not
+claim a working desktop.
+
 ## Known limitations / validation status
 
 Verified against the ARM64 rootfs binaries (no device), by running the shipped
@@ -229,10 +263,10 @@ guest session script end to end in a chroot on an aarch64 host:
 * the Lomiri shell starts, selects `mir:wayland` as its display platform, gets a
   display sink for its screen, and creates its own socket (`wayland-1`);
 * `termdeb-mir-bridge` attaches to the outer server, captures with
-  wlr-screencopy and writes real frames into `fb.buf` - a capture of the running
-  desktop is ~96% non-black with the Lomiri wallpaper/status-bar/launcher
-  structure visible. A known-colour test client was captured correctly, i.e. the
-  frame is neither vertically flipped nor colour-channel swapped.
+  wlr-screencopy and writes real frames into `fb.buf`. A known-colour test client
+  was captured correctly, i.e. the frame is neither vertically flipped nor
+  colour-channel swapped. What the shell actually draws is described under
+  "The shell has no session" below - it is *not* a populated desktop.
 * `provision-desktop.sh` runs the *same* session script as its smoke test and
   fails the build unless non-black desktop pixels reach the shared framebuffer,
   the bridge reports no capture error, and the session reports frames reaching
@@ -242,7 +276,7 @@ guest session script end to end in a chroot on an aarch64 host:
   unanswered requests, re-attached to the compositor over a thousand times
   without a crash or a leaked frame mapping, marked the stalled state, and still
   captured real frames whenever the timeout allowed a request to complete.
-  The same session reported `Desktop is rendering (frame N)` in both runs.
+  The same session reported `Desktop frames are flowing (frame N)` in both runs.
 
 ## When the desktop is black
 
@@ -250,14 +284,21 @@ The desktop cannot be silently black any more; every layer reports what it is
 doing:
 
 * the session script logs `Waiting for the first frame in /run/termdeb/fb.buf...`
-  and then either `Desktop is rendering (frame N); the Android view is being fed.`
-  or, after 30 s without a frame, a `WARNING: no desktop frame reached ...` line
-  followed by the tail of `bridge.log`. That is the first thing to read, and the
-  app shows the same status on the surface (see below);
-* `bridge.log` records `frame N captured (WxH, 4096 sampled pixels, M non-black)`
+  and then either `Desktop frames are flowing (frame N); the Android view is
+  receiving them.` or, after 30 s without a frame, a `WARNING: no desktop frame
+  reached ...` line followed by the tail of `bridge.log`. It also warns when the
+  guest has no system bus (see "The shell has no session") and reports a fatal
+error in `lomiri.log` - a hung shell keeps answering capture requests, so
+  frames alone do not mean the desktop is alive. That output is the first thing
+  to read, and the app shows the same status on the surface (see below);
+* `bridge.log` records `frame N captured (WxH, S sampled pixels, M non-black)`
   every 150 frames, so a black *capture* (nothing composited yet) can be told
   apart from a desktop that never captured at all, and any fatal condition
-  (`ERROR: ...`) names itself;
+  (`ERROR: ...`) names itself. `S` is sampled whole pixels: the copy forces alpha
+  opaque, so a byte-wise check would report an all-black frame as mostly
+  non-black. Consecutive reports that fingerprint the same picture add a
+  `WARNING: the compositor has served an unchanged frame for ...` line, which is
+  what an idle-or-stuck desktop looks like;
 * `mir.log` records Mir startup, the selected platform drivers, and whether the
   virtual output was configured;
 * `lomiri.log` records whether the shell nested on the outer server
@@ -281,6 +322,11 @@ Failure modes that have been seen on a device, and what they meant:
   the header is marked stalled. A request Mir never answers - e.g. because it
   never composed a frame - used to leave the bridge idle forever with the app on a
   black screen.
+* **Frames flowing, screen still blank.** The bridge and the app are working and
+the framebuffer holds a real Lomiri frame - but the shell has no session, so the
+frame is a wallpaper with an empty panel and launcher. See "The shell has no
+session": this is the state the desktop is in today, and it is not fixable at the
+bridge or app layer.
 * **A black screen before the shell paints.** The frame is genuinely black until
   Lomiri paints; with software rendering (llvmpipe) on a phone-sized geometry this
   is tens of seconds. Logcat/`bridge.log` now shows those frames as
@@ -291,11 +337,12 @@ Still not yet validated on a real device:
 * Frame latency, touch calibration, proot's syscall filtering, and the app-side
   surface path (first-frame pacing, rotation). The app-side status notice is
   compile-verified only: it needs a device to see it drawn.
-* What the shell shows beyond the desktop surface: no app has been launched from
-  the desktop and the greeter's user/AccountsService lookups fail in the guest
-  (`Failed to get 'RealName' property`, `Cannot read property 'username' of
-  undefined`), so the session may stop at the greeter rather than a logged-in
-  desktop.
+* What the shell shows beyond the desktop surface: the shell's session services
+  are missing in the guest, so the desktop is the wallpaper-only shell described
+  under "The shell has no session". Providing them (system bus + logind +
+  AccountsService + LightDM/PAM, and a systemd user session for
+  `lomiri-app-launch`) is the open work item behind a desktop that can actually
+  be used.
 * The app launch path: apps launched by the shell talk to the nested server through
   `WAYLAND_DISPLAY`; the session publishes that variable, but the launch path
   (`lomiri-app-launch`, which in the guest has no systemd user session) has not

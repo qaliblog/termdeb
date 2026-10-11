@@ -125,6 +125,11 @@ struct bridge {
     unsigned stalls;
     uint64_t frames_written;
 
+    /* Progress diagnostics: fingerprint of the last reported frame and how many
+       consecutive reports showed no change. */
+    uint64_t last_fingerprint;
+    unsigned frozen_reports;
+
     /* Current screencopy frame (an object per capture request). The manager is
        bound at version 3 when the compositor offers it, and then the copy
        request has to wait for the buffer_done event; on versions 1/2 it goes
@@ -424,21 +429,52 @@ static void copy_frame_to_fb(struct bridge *b) {
 
 /* Sampled "is there anything on screen" check, used only for the progress log
    lines so a black desktop can be told apart from a desktop that never
-   captured. */
-static uint32_t sampled_nonblack_pixels(struct bridge *b) {
+   captured (and from one that shows a wall of a single colour).
+
+   Samples whole pixels: the copy forces alpha to 0xFF for every pixel, so any
+   check that walks bytes would call an all-black frame "mostly non-black" and
+   make this diagnostic useless. */
+static uint32_t sampled_nonblack_pixels(struct bridge *b, uint32_t *sampled) {
     const uint8_t *p;
-    size_t total, step, off;
-    uint32_t nonblack = 0;
+    size_t pixels, step, i, off;
+    uint32_t nonblack = 0, count = 0;
+
+    if (sampled) *sampled = 0;
+    if (!b->fb_map) return 0;
+    p = b->fb_map + FB_HEADER_SIZE;
+    pixels = (size_t)b->width * b->height;
+    step = pixels / 4096u;
+    if (step < 1) step = 1;
+    for (i = 0; i < pixels; i += step) {
+        off = i * 4;
+        count++;
+        if (p[off] || p[off + 1] || p[off + 2]) nonblack++;
+    }
+    if (sampled) *sampled = count;
+    return nonblack;
+}
+
+/* Cheap fingerprint of the sampled pixels, so the log can say whether the
+   compositor is still drawing something new or has been serving the same frame
+   for a while (an idle desktop looks exactly as blank as a stuck one). */
+static uint64_t sampled_frame_fingerprint(struct bridge *b) {
+    const uint8_t *p;
+    size_t pixels, step, i, off;
+    uint64_t hash = 1469598103934665603ull; /* FNV-1a offset basis */
 
     if (!b->fb_map) return 0;
     p = b->fb_map + FB_HEADER_SIZE;
-    total = (size_t)b->width * b->height * 4;
-    step = total / 4096;
-    if (step < 4) step = 4;
-    for (off = 0; off + 3 < total; off += step) {
-        if (p[off] || p[off + 1] || p[off + 2]) nonblack++;
+    pixels = (size_t)b->width * b->height;
+    step = pixels / 4096u;
+    if (step < 1) step = 1;
+    for (i = 0; i < pixels; i += step) {
+        off = i * 4;
+        for (unsigned c = 0; c < 3; c++) {
+            hash ^= p[off + c];
+            hash *= 1099511628211ull;
+        }
     }
-    return nonblack;
+    return hash;
 }
 
 /* ------------------------------------------------------------------ screencopy */
@@ -496,12 +532,30 @@ static void sc_ready(void *data, struct zwlr_screencopy_frame_v1 *frame, uint32_
     b->frame_ready = true;
     b->frames_written++;
     if (b->frames_written == 1 || (b->frames_written % FRAME_LOG_INTERVAL) == 0) {
-        uint32_t nonblack = sampled_nonblack_pixels(b);
+        uint32_t sampled = 0;
+        uint32_t nonblack = sampled_nonblack_pixels(b, &sampled);
+        uint64_t fingerprint = sampled_frame_fingerprint(b);
         log_msg("frame %u captured (%ux%u, %u sampled pixels, %u non-black)",
-                (unsigned)b->frames_written, b->buf_width, b->buf_height, 4096u, nonblack);
-        if (nonblack == 0)
+                (unsigned)b->frames_written, b->buf_width, b->buf_height,
+                (unsigned)sampled, nonblack);
+        if (nonblack == 0) {
             log_msg("WARNING: the captured frame is entirely black; the compositor "
                     "has no desktop content to show yet");
+        } else if (fingerprint == b->last_fingerprint) {
+            /* Same picture as the last report: either a genuinely static screen
+               (idle desktop, a solid wallpaper) or a compositor that stopped
+               drawing while still answering capture requests. */
+            b->frozen_reports++;
+            if (b->frozen_reports % 6 == 0)
+                log_msg("WARNING: the compositor has served an unchanged frame for %u "
+                        "consecutive reports (~%us): the desktop is idle, or the shell "
+                        "is not drawing anything",
+                        (unsigned)b->frozen_reports,
+                        (unsigned)(b->frozen_reports * (FRAME_LOG_INTERVAL / 30u)));
+        } else {
+            b->frozen_reports = 0;
+        }
+        b->last_fingerprint = fingerprint;
     }
     sc_finish(b);
 }

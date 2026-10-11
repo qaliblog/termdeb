@@ -432,16 +432,36 @@ SMOKE_SESSION=$!
 # runs under QEMU emulation, so this is deliberately generous; it stops as soon as
 # real content appears in the framebuffer.
 #
-# Frames copied so far: byte offset 24 of the framebuffer header.
-smoke_frames() {
+# Little-endian uint32 at word index $1 of the framebuffer header.
+smoke_word() {
   local value
-  value="$(dd if="${SMOKE_FB}" bs=4 skip=6 count=1 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n')"
+  value="$(dd if="${SMOKE_FB}" bs=4 skip="$1" count=1 2>/dev/null | od -An -tu4 2>/dev/null | tr -d ' \n')"
   case "${value:-x}" in ''|*[!0-9]*) printf '0' ;; *) printf '%s' "${value}" ;; esac
 }
-# Non-zero bytes among the first pixels (offset 32 is the first pixel), i.e. is
-# the captured frame anything other than a black screen.
+# Frames copied so far: byte offset 24 of the framebuffer header.
+smoke_frames() { smoke_word 6; }
+# Is the captured frame anything other than a black screen?
+#
+# Counts *whole pixels*: the bridge forces alpha to 0xFF for every pixel it
+# writes, so a byte-wise count would report an entirely black frame as ~25%
+# non-black. A pixel word is A<<24 | B<<16 | G<<8 | R (little-endian), so its low
+# 24 bits are the colour. Sampled from three bands across the frame (1/4, 1/2 and
+# the bottom), because the top rows are the shell's panel - black by design - and
+# sampling only those would call a wallpaper-only desktop black.
 smoke_nonblack() {
-  dd if="${SMOKE_FB}" bs=1 skip=32 count=200000 2>/dev/null | tr -d '\000' | wc -c | tr -d ' '
+  local w h band skip
+  w="$(smoke_word 2)"
+  h="$(smoke_word 3)"
+  if [ "${w}" -le 0 ] || [ "${h}" -le 0 ]; then
+    w=2480
+    h=1232
+  fi
+  for band in 4 2 1; do
+    skip=$(( 8 + (w * h / band) / 4 ))
+    dd if="${SMOKE_FB}" bs=4 skip="${skip}" count=5000 2>/dev/null
+  done | od -An -tu4 -v 2>/dev/null \
+       | tr -s ' ' '\n' \
+       | awk '/^[0-9]+$/ && ($1 % 16777216) != 0 { n++ } END { print n + 0 }'
 }
 
 SMOKE_SEQ=0
@@ -551,7 +571,7 @@ if grep -q 'WARNING: still no frame' "${SMOKE_BRIDGE_LOG}"; then
   echo '  [smoke] note: the bridge stalled before the first frame'
 fi
 
-if grep -q 'Desktop is rendering (frame ' "${SMOKE_DIR}/session.log"; then
+if grep -q 'Desktop frames are flowing (frame ' "${SMOKE_DIR}/session.log"; then
   echo '  [smoke] OK  the session reported desktop frames reaching the framebuffer'
 else
   echo '  [smoke] FAIL the session never reported a frame in the shared framebuffer' >&2
@@ -559,9 +579,9 @@ else
 fi
 
 if [ "${SMOKE_SEQ}" -gt 0 ] && [ "${SMOKE_NONBLACK}" -gt 0 ]; then
-  echo "  [smoke] OK  the desktop rendered into the shared framebuffer (${SMOKE_NONBLACK} non-zero pixel bytes)"
+  echo "  [smoke] OK  the compositor rendered into the shared framebuffer (${SMOKE_NONBLACK} of 15000 sampled pixels non-black)"
 else
-  echo "  [smoke] FAIL no desktop content reached the shared framebuffer (frames: ${SMOKE_SEQ})" >&2
+  echo "  [smoke] FAIL no compositor content reached the shared framebuffer (frames: ${SMOKE_SEQ}, non-black pixels: ${SMOKE_NONBLACK})" >&2
   SMOKE_STATUS=1
 fi
 
